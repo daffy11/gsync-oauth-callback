@@ -1,9 +1,12 @@
-name: Publish GSync Limited prerelease
+name: Validate and publish GSync Limited prerelease
 on:
   push:
     branches: [main]
     paths:
-      - .dist/ux-fix2.b64
+      - main.js
+      - manifest.json
+      - versions.json
+      - scripts/release-smoke.cjs
       - .github/workflows/publish-limited.yml
   workflow_dispatch:
 
@@ -11,37 +14,24 @@ permissions:
   contents: write
 
 jobs:
-  publish:
+  validate-and-publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Rebuild plugin and verify UX patch
+      - name: Syntax and regression checks
         run: |
-          cat .dist/part{1,2,3,4}.b64 | base64 -d | xz -d > main.js
-          python3 scripts/folder-picker-hotfix.py
-          cat .dist/ux-fix{1,2}.b64 | base64 -d | xz -d > scripts/ux-hotfix.py
-          python3 scripts/ux-hotfix.py
           node --check main.js
+          node scripts/release-smoke.cjs
           grep -q '"id": "gsync-limited"' manifest.json
-          grep -q '"version": "0.2.2"' manifest.json
-          grep -q 'async verifyConnection' main.js
-          grep -q '認証URLをコピー' main.js
-          grep -q 'drive.file' main.js
-      - name: Commit distributable and readable patch
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add main.js manifest.json versions.json scripts/ux-hotfix.py
-          if ! git diff --staged --quiet; then
-            git commit -m 'Build GSync Limited 0.2.2 user-friendly sync setup'
-            git push origin HEAD:main
-          fi
-      - name: Publish BRAT prerelease
+          grep -q '"version": "0.2.3"' manifest.json
+          test -s main.js
+          sha256sum main.js manifest.json
+      - name: Publish BRAT prerelease 0.2.3
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view 0.2.2 >/dev/null 2>&1; then
-            gh release upload 0.2.2 main.js manifest.json --clobber
+          if gh release view 0.2.3 >/dev/null 2>&1; then
+            gh release upload 0.2.3 main.js manifest.json --clobber
           else
-            gh release create 0.2.2 main.js manifest.json --title 'GSync Limited 0.2.2 (experimental)' --notes 'UX update: status dashboard, explicit browser fallback, connection test. Still experimental: Google drive.file does not guarantee visibility of all third-party files. Back up and test with disposable vault.' --prerelease --target main
+            gh release create 0.2.3 main.js manifest.json --title 'GSync Limited 0.2.3 (experimental)' --notes 'Setup clarity: required vs advanced options, read-only file visibility scan, explicit warning about limited drive.file grants, and hard stop when an external folder has no individual grants. Warning: selected folder does not grant all descendants. Not verified for full automatic sync. Do not use on your only copy of notes.' --prerelease --target main
           fi
