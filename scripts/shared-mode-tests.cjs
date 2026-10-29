@@ -13,7 +13,7 @@ let successes=0;
 const test=async(name,f)=>{await f();successes++;console.log('PASS:',name)};
 const instance=()=>{
  const p=new G();p.cfg={...DEFAULTS,modeProfiles:{},state:{},selectedFiles:{},protectedLocal:[],pendingByMode:{}};
- p.app={vault:{getName:()=> 'test'}};p.save=async()=>{};p.tab={display:()=>{}};p.invalidate=()=>{p.previewed=null};
+ p.app={vault:{getName:()=> 'test'}};p.save=async()=>{};p.tab={display:()=>{}};p.invalidate=()=>{p.previewed=null};p.preparedAuth={};
  p.drive={about:async()=>({user:{emailAddress:'sync@example.com'}}),get:async(id)=>({id,name:'shared',mimeType:folder,capabilities:{canAddChildren:true}}),list:async()=>[]};
  return p;
 };
