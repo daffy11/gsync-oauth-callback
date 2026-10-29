@@ -79,6 +79,21 @@ const SyncCore = (() => {
 
 'use strict';
 const SCOPE='https://www.googleapis.com/auth/drive.file';
+const SHARED_SCOPE='https://www.googleapis.com/auth/drive';
+const parseSharedFolderId = value => {
+  const raw=String(value||'').trim();
+  let id=raw;
+  try {
+    const u=new URL(raw);
+    if(!['drive.google.com','docs.google.com'].includes(u.hostname))throw Error('Google DriveのフォルダURLを入力してください');
+    const m=u.pathname.match(/\/folders\/([^/?#]+)/);
+    id=m ? m[1] : u.searchParams.get('id')||'';
+  }catch(e){
+    if(raw.includes('://'))throw e;
+  }
+  if(!/^[a-zA-Z0-9_-]{10,}$/.test(id))throw Error('共有フォルダのURLまたはIDが正しくありません');
+  return id;
+};
 const AUTH='https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN='https://oauth2.googleapis.com/token';
 const API='https://www.googleapis.com/drive/v3';
@@ -88,11 +103,14 @@ const REDIRECT='https://daffy11.github.io/gsync-oauth-callback/limited-callback.
 const form = v => new URLSearchParams(v).toString();
 const b64 = b => btoa(String.fromCharCode(...b)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 const oauthUrl = async (clientId,redirect,vaultName,pickMode='folder') => {
-  if(pickMode!=='folder' && pickMode!=='files')throw Error('Invalid Picker mode');
+  if(!['folder','files','shared','reauth'].includes(pickMode))throw Error('Invalid Picker mode');
   const verifier=b64(crypto.getRandomValues(new Uint8Array(32)));
   const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier)));
   const state=b64(crypto.getRandomValues(new Uint8Array(24)))+'~'+b64(new TextEncoder().encode(vaultName));
-  const args={client_id:clientId,redirect_uri:redirect,response_type:'code',scope:SCOPE,code_challenge:b64(digest),code_challenge_method:'S256',access_type:'offline',prompt:'consent',state,trigger_onepick:'true',allow_multiple:pickMode==='files'?'true':'false',allow_folder_selection:pickMode==='folder'?'true':'false'};
+  const args={client_id:clientId,redirect_uri:redirect,response_type:'code',scope:pickMode==='shared'?SHARED_SCOPE:SCOPE,code_challenge:b64(digest),code_challenge_method:'S256',access_type:'offline',prompt:'consent',state,trigger_onepick:'true',allow_multiple:pickMode==='files'?'true':'false',allow_folder_selection:pickMode==='folder'?'true':'false'};
+  if(pickMode==='shared'||pickMode==='reauth'){
+    delete args.trigger_onepick;delete args.allow_multiple;delete args.allow_folder_selection;
+  }
   if(pickMode==='folder')args.mimetypes=FOLDER;
   return {url:AUTH+'?'+form(args),pending:{verifier,state,redirect,time:Date.now(),pickMode}};
 };
@@ -110,7 +128,37 @@ class DriveIO {
       return r;
     }
   }
-  async get(id){return (await this.send(API+'/files/'+encodeURIComponent(id)+'?fields='+encodeURIComponent('id,name,mimeType,parents,md5Checksum,modifiedTime,size,version,appProperties,trashed'))).json;}
+  async get(id){return (await this.send(API+'/files/'+encodeURIComponent(id)+'?fields='+encodeURIComponent('id,name,mimeType,parents,md5Checksum,modifiedTime,size,version,appProperties,trashed,capabilities(canAddChildren,canEdit)'))).json;}
+  async about(){
+    const r=await this.send(API+'/about?fields='+encodeURIComponent('user(emailAddress,displayName)'));
+    return r.json;
+  }
+  async isInsideRoot(id,rootId){
+    let current=id,visited=new Set();
+    for(let depth=0;depth<48;depth++){
+      if(current===rootId)return true;
+      if(visited.has(current))return false;
+      visited.add(current);
+      const f=await this.get(current);
+      current=(f.parents||[])[0];
+      if(!current)return false;
+    }
+    return false;
+  }
+  async listSharedFolders(){
+    const out=[];let page='';
+    do{
+      const qs=new URLSearchParams({
+        q:"sharedWithMe = true and mimeType = '"+FOLDER+"' and trashed = false",
+        fields:'nextPageToken,files(id,name,mimeType,capabilities(canAddChildren),webViewLink)',
+        spaces:'drive',pageSize:'1000'
+      });
+      if(page)qs.set('pageToken',page);
+      const r=(await this.send(API+'/files?'+qs)).json;
+      out.push(...(r.files||[]));page=r.nextPageToken||'';
+    }while(page);
+    return out;
+  }
   async list(id){
     let out=[],cursor='';
     do{
@@ -189,7 +237,8 @@ const DEFAULTS={
   autoMinutes:0,autoEnabled:false,autoRemoteWrites:false,syncOnStartup:false,maxFileSizeMB:20,
   // The drive.file scope never guarantees folder-complete visibility. Keep writes off until explicit opt-in.
   allowRemoteWrites:false,
-  lastAuthCheck:0,lastAuthError:'',lastSyncAt:0,lastSyncResult:'',lastSyncError:'',pendingByMode:{},lastScanAt:0,lastScanRoot:'',lastVisibleFileCount:null,lastVisibleFolderCount:null,lastScanError:''
+  lastAuthCheck:0,lastAuthError:'',lastSyncAt:0,lastSyncResult:'',lastSyncError:'',pendingByMode:{},lastScanAt:0,lastScanRoot:'',lastVisibleFileCount:null,lastVisibleFolderCount:null,lastScanError:'',
+  accessMode:'limited',modeProfiles:{},expectedDedicatedEmail:'',connectedAccountEmail:'',testingMode:true,authGrantedAt:0,needsReauth:false,reauthReason:'',lastExpiryAlertAt:0
 };
 const randomId = () => b64(crypto.getRandomValues(new Uint8Array(9)));
 const sha256 = async data => b64(new Uint8Array(await crypto.subtle.digest('SHA-256',data)));
@@ -213,11 +262,73 @@ class GSyncLimited extends Plugin {
       if(this.cfg.autoEnabled && this.cfg.autoMinutes>0 && Date.now()-this.lastSync>this.cfg.autoMinutes*60000)void this.autoRun();
     },60000);this.registerInterval(this.interval);
     if(this.cfg.syncOnStartup && this.cfg.autoEnabled)this.app.workspace.onLayoutReady(()=>window.setTimeout(()=>void this.autoRun(),8000));
+    // An iPhone plugin cannot push a notification while Obsidian is closed.
+    // Check the actual refresh token after opening Obsidian and periodically while it is active.
+    this.app.workspace.onLayoutReady(()=>window.setTimeout(()=>void this.checkAuthHealth(),2200));
+    this.registerInterval(window.setInterval(()=>void this.checkAuthHealth(),6*60*60*1000));
   }
   async save(){await this.saveData(this.cfg);}
   invalidate(){this.previewed=null;}
+  async switchAccessMode(mode){
+    if(!['limited','shared'].includes(mode))throw Error('Invalid sync mode');
+    const from=this.cfg.accessMode||'limited';
+    if(mode===from)return;
+    const fields=['refreshToken','rootId','rootName','ownRoot','selectedFiles','initializedRoot','state','protectedLocal','allowRemoteWrites','lastScanAt','lastScanRoot','lastVisibleFileCount','lastVisibleFolderCount','lastSyncAt','lastSyncResult','lastSyncError','expectedDedicatedEmail','connectedAccountEmail','authGrantedAt','needsReauth','reauthReason','lastAuthCheck'];
+    this.cfg.modeProfiles=this.cfg.modeProfiles||{};
+    this.cfg.modeProfiles[from]=Object.fromEntries(fields.map(k=>[k,this.cfg[k]]));
+    const target=this.cfg.modeProfiles[mode]||{};
+    for(const k of fields)this.cfg[k]=Object.prototype.hasOwnProperty.call(target,k)?target[k]:DEFAULTS[k];
+    this.cfg.accessMode=mode;
+    this.cfg.pendingByMode={};this.preparedAuth={};this.authPreparing={};
+    this.liveAccessToken='';this.accessExpiry=0;this.invalidate();
+    await this.save();this.tab.display();
+    new Notice(mode==='shared'?'専用Googleアカウントモードに切り替えました。対象アカウントで認証してください。':'個別ファイル許可モードに戻しました。',9000);
+  }
+  async checkAuthHealth(){
+    if(!this.cfg.refreshToken)return;
+    if(this.cfg.needsReauth){
+      if(Date.now()-this.cfg.lastExpiryAlertAt>6*60*60*1000){
+        this.cfg.lastExpiryAlertAt=Date.now();await this.save();
+        new Notice('GSync Limited: Googleの認証期限が切れています。設定から「再認証」を実行してください。',16000);
+      }
+      return;
+    }
+    try{await this.getAccess();}catch(e){
+      console.warn('[gsync-limited] auth health',e);
+      if(this.cfg.needsReauth){
+        this.cfg.lastExpiryAlertAt=Date.now();await this.save();
+        new Notice('GSync Limited: Google認証が失効しました。設定画面から再認証してください。',17000);
+        this.tab.display();
+      }
+    }
+  }
+  async selectSharedRoot(input){
+    if(this.cfg.accessMode!=='shared')throw Error('共有フォルダモードでのみ指定できます');
+    if(this.cfg.needsReauth||!this.cfg.refreshToken)throw Error('先に専用Googleアカウントで認証してください');
+    const id=parseSharedFolderId(input);
+    const f=await this.drive.get(id);
+    if(f.trashed||f.mimeType!==FOLDER)throw Error('アクセス可能なフォルダではありません');
+    if(f.capabilities?.canAddChildren!==true)throw Error('共有フォルダの「編集者」権限がありません。共有設定を確認してください');
+    await this.drive.list(id); // Verify list permission before accepting it.
+    if(id!==this.cfg.rootId){
+      this.cfg.state={};this.cfg.initializedRoot='';this.cfg.protectedLocal=[];
+      this.cfg.allowRemoteWrites=false;this.cfg.selectedFiles={};
+      this.cfg.lastScanAt=0;this.cfg.lastScanRoot='';this.cfg.lastVisibleFileCount=null;
+    }
+    this.cfg.rootId=id;this.cfg.rootName=f.name;this.cfg.ownRoot=false;
+    this.invalidate();await this.save();this.tab.display();
+    new Notice('共有フォルダ '+f.name+' を登録しました。次にファイル一覧を確認してください。',12000);
+  }
+  async discoverSharedFolders(){
+    if(this.cfg.accessMode!=='shared')throw Error('共有フォルダモードでのみ利用できます');
+    this.sharedCandidates=await this.drive.listSharedFolders();
+    this.tab.display();
+    new Notice('共有フォルダを '+this.sharedCandidates.length+' 件取得しました。',8000);
+  }
   async prepareAuth(pickMode='folder'){
-    if(!['folder','files'].includes(pickMode))throw Error('Invalid OAuth Picker mode');
+    if(!['folder','files','shared','reauth'].includes(pickMode))throw Error('Invalid OAuth mode');
+    if(this.cfg.accessMode==='shared'&&pickMode!=='shared')throw Error('共有モードでは専用アカウント認証のみ使用します');
+    if(this.cfg.accessMode!=='shared'&&pickMode==='shared')throw Error('限定モードでは共有アカウント認証を使用しません');
     if(!this.cfg.clientId||!this.cfg.clientSecret)return false;
     if(this.authPreparing[pickMode])return this.authPreparing[pickMode];
     const job=(async()=>{
@@ -234,6 +345,7 @@ class GSyncLimited extends Plugin {
   }
   async requestSignIn(pickMode='folder'){
     if(pickMode==='files'&&!this.cfg.rootId)throw Error('先にフォルダを選択してください');
+    if(pickMode==='shared'&&!this.cfg.expectedDedicatedEmail)throw Error('同期専用Googleアカウントのメールアドレスを先に設定してください');
     if(!this.cfg.clientId||!this.cfg.clientSecret)throw Error('OAuthクライアントIDとシークレットを入力してください');
     const entry=this.preparedAuth[pickMode],key=this.cfg.clientId+'|'+this.cfg.redirectUri;
     if(!entry||entry.key!==key||Date.now()-entry.pending.time>=12*60000){
@@ -266,6 +378,13 @@ class GSyncLimited extends Plugin {
     if(!this.cfg.refreshToken)throw Error('認証情報がありません');
     try{
       await this.getAccess();
+      if(this.cfg.accessMode==='shared'){
+        if(!this.cfg.expectedDedicatedEmail)throw Error('同期専用メールアドレスを入力してください');
+        const about=await this.drive.about();
+        const actual=String(about.user?.emailAddress||'').toLowerCase();
+        if(!actual||actual!==this.cfg.expectedDedicatedEmail.trim().toLowerCase())throw Error('Googleアカウントが同期専用のものと一致しません: '+(actual||'不明'));
+        this.cfg.connectedAccountEmail=actual;
+      }
       if(this.cfg.rootId){
         const root=await this.drive.get(this.cfg.rootId);
         if(root.trashed||root.mimeType!==FOLDER)throw Error('同期先フォルダにアクセスできません');
@@ -278,14 +397,14 @@ class GSyncLimited extends Plugin {
   async scanRemoteReadOnly(){
     if(!this.cfg.refreshToken||!this.cfg.rootId)throw Error('先にGoogle認証とフォルダ選択が必要です。');
     try{
-      const tree=await this.drive.tree(this.cfg.rootId,this.cfg.selectedFiles);
+      const tree=await this.drive.tree(this.cfg.rootId,this.cfg.accessMode==='shared'?{}:this.cfg.selectedFiles);
       this.cfg.lastScanAt=Date.now();
       this.cfg.lastScanRoot=this.cfg.rootId;
       this.cfg.lastVisibleFileCount=tree.files.size;
       this.cfg.lastVisibleFolderCount=Math.max(0,tree.folders.size-1);
       this.cfg.lastScanError='';
       await this.save();
-      new Notice('読み取れるファイル: '+tree.files.size+'件。ただし未許可ファイルは見えていない可能性があります。',12000);
+      new Notice('Driveから見つかったファイル: '+tree.files.size+'件'+(this.cfg.accessMode==='shared'?'（共有フォルダ内）':'（個別許可の範囲）'),12000);
     }catch(e){
       this.cfg.lastScanError=String(e.message||e);
       await this.save();
@@ -300,8 +419,24 @@ class GSyncLimited extends Plugin {
       if(!p||Date.now()-p.time>15*60*1000||args.state!==p.state||!args.code)throw Error('Invalid/expired OAuth state');
       const result=guardTokenResponse(await requestUrl({url:TOKEN,method:'POST',contentType:'application/x-www-form-urlencoded',body:form({client_id:this.cfg.clientId,client_secret:this.cfg.clientSecret,code:args.code,code_verifier:p.verifier,redirect_uri:p.redirect,grant_type:'authorization_code'}),throw:false}),'Code exchange');
       this.liveAccessToken=result.access_token;this.accessExpiry=Date.now()+(result.expires_in-60)*1000;
+      if(p.pickMode==='shared'){
+        const about=await this.drive.about();
+        const actual=String(about.user?.emailAddress||'').toLowerCase();
+        const expected=String(this.cfg.expectedDedicatedEmail||'').trim().toLowerCase();
+        if(!expected||actual!==expected){
+          this.liveAccessToken='';this.accessExpiry=0;
+          throw Error('専用アカウントが一致しません。認証を許可したアカウント: '+(actual||'取得不可')+'。誤ってメインアカウントで許可した場合はGoogleの接続管理で取り消してください。');
+        }
+        this.cfg.connectedAccountEmail=actual;
+      }
       this.cfg.refreshToken=result.refresh_token||this.cfg.refreshToken;
+      this.cfg.needsReauth=false;this.cfg.reauthReason='';this.cfg.authGrantedAt=Date.now();
       this.cfg.lastAuthCheck=Date.now();this.cfg.lastAuthError='';
+      if(p.pickMode==='shared'||p.pickMode==='reauth'){
+        this.invalidate();
+        new Notice(p.pickMode==='shared'?'同期専用Googleアカウントの認証が完了しました。':'Googleを再認証しました。',10000);
+        return;
+      }
       const picked=String(args.picked_file_ids||'').split(',').filter(Boolean);
       const selected=await Promise.all(picked.map(id=>this.drive.get(id)));
       const folders=selected.filter(file=>file.mimeType===FOLDER);
@@ -331,12 +466,33 @@ class GSyncLimited extends Plugin {
     finally{if(matched){delete this.cfg.pendingByMode[matched[0]];delete this.preparedAuth[matched[0]];}this.cfg.pending=null;await this.save();this.tab.display();}
   }
   async getAccess(){
+    if(this.cfg.needsReauth)throw Error('Google認証が期限切れです。GSync Limited設定から再認証してください。');
     if(this.liveAccessToken&&Date.now()<this.accessExpiry)return this.liveAccessToken;
     if(!this.cfg.refreshToken)throw Error('Google sign-in required');
-    const result=guardTokenResponse(await requestUrl({url:TOKEN,method:'POST',contentType:'application/x-www-form-urlencoded',body:form({client_id:this.cfg.clientId,client_secret:this.cfg.clientSecret,refresh_token:this.cfg.refreshToken,grant_type:'refresh_token'}),throw:false}),'Token refresh');
-    this.liveAccessToken=result.access_token;this.accessExpiry=Date.now()+(result.expires_in-60)*1000;return result.access_token;
+    const r=await requestUrl({
+      url:TOKEN,method:'POST',contentType:'application/x-www-form-urlencoded',
+      body:form({client_id:this.cfg.clientId,client_secret:this.cfg.clientSecret,refresh_token:this.cfg.refreshToken,grant_type:'refresh_token'}),
+      throw:false
+    });
+    if(r.status!==200){
+      const expired=r.json?.error==='invalid_grant'||String(r.text||'').includes('invalid_grant');
+      if(expired){
+        this.cfg.needsReauth=true;
+        this.cfg.reauthReason='Googleがリフレッシュトークンを無効と判定しました（テスト中のOAuthなら原則7日で失効）。';
+        this.cfg.lastAuthError=this.cfg.reauthReason;
+        this.liveAccessToken='';this.accessExpiry=0;this.invalidate();await this.save();
+        this.tab.display();
+        throw Error(this.cfg.reauthReason+' 「再認証」を押してください。');
+      }
+      throw Error('Google token refresh failed ('+r.status+'): '+String(r.text||'').slice(0,180));
+    }
+    const result=guardTokenResponse(r,'Token refresh');
+    this.liveAccessToken=result.access_token;
+    this.accessExpiry=Date.now()+(result.expires_in-60)*1000;
+    return result.access_token;
   }
   async createOwnRoot(){
+    if(this.cfg.accessMode==='shared')throw Error('共有フォルダモードでは既存の共有フォルダを指定してください');
     if(!this.cfg.refreshToken)throw Error('Sign in first');
     if(this.cfg.rootId)throw Error('Root already selected. Change root only after exporting/backup and clearing root.');
     const name='GSync-Limited-'+this.app.vault.getName();
@@ -356,7 +512,7 @@ class GSyncLimited extends Plugin {
   }
   async inventory(){
     if(!this.cfg.refreshToken||!this.cfg.rootId)throw Error('Sign in and select/create one Drive root folder first.');
-    const tree=await this.drive.tree(this.cfg.rootId,this.cfg.selectedFiles);
+    const tree=await this.drive.tree(this.cfg.rootId,this.cfg.accessMode==='shared'?{}:this.cfg.selectedFiles);
     const local=await this.localInventory();
     for(const [path,r] of tree.files){
       if(!SyncCore.cleanPath(path))throw Error('Drive contains unsafe path: '+path);
@@ -417,6 +573,8 @@ class GSyncLimited extends Plugin {
       if(now!==task.localHash)throw Error('Local file changed since review: '+task.path);
     }else if(this.app.vault.getAbstractFileByPath(task.path))throw Error('New local item since review: '+task.path);
     if(task.remote){
+      if(this.cfg.accessMode==='shared'&&!(await this.drive.isInsideRoot(task.remoteId,this.cfg.rootId)))
+        throw Error('共有フォルダ外へ移動したファイルには操作しません: '+task.path);
       const r=await this.drive.get(task.remoteId);
       if(r.trashed||SyncCore.rev(r)!==task.remoteRevision||r.id!==task.remoteId)throw Error('Drive item changed by another app since review: '+task.path);
     }
@@ -427,7 +585,7 @@ class GSyncLimited extends Plugin {
     for(const name of names){
       cur=cur?cur+'/'+name:name;
       if(!folders.has(cur)){
-        if(!this.cfg.ownRoot)throw Error('Cannot create folders under externally managed Drive root');
+        if(!this.cfg.ownRoot&&this.cfg.accessMode!=='shared')throw Error('Cannot create folders under externally managed Drive root');
         const f=await this.drive.createFolder(name,parent,false);
         folders.set(cur,f.id);
       }
@@ -442,7 +600,7 @@ class GSyncLimited extends Plugin {
     try{
       const inv=await this.inventory(),tasks=this.plan(inv);
       if(tasks.some(t=>t.action==='BLOCK'))throw Error('Known file missing/invisible');
-      if(tasks.some(t=>t.action==='local-to-drive') && (!this.cfg.autoRemoteWrites || !this.cfg.allowRemoteWrites || !this.cfg.ownRoot))throw Error('Automatic remote writes require a plugin-owned root; external roots require manual review');
+      if(tasks.some(t=>t.action==='local-to-drive') && (!this.cfg.autoRemoteWrites || !this.cfg.allowRemoteWrites || !this.cfg.ownRoot && this.cfg.accessMode!=='shared'))throw Error('Automatic remote writes require explicitly authorized shared mode or plugin-owned root');
       this.previewed={digest:SyncCore.fingerprint(tasks,this.cfg.rootId,this.policy()),tasks,at:Date.now(),counts:SyncCore.summary(tasks),local:inv.local.size,remote:inv.tree.files.size};
     }catch(e){this.invalidate();this.lastSync=Date.now();new Notice('GSync auto-sync paused: '+e.message,7000);return;}
     finally{this.busy=false;}
@@ -458,14 +616,14 @@ class GSyncLimited extends Plugin {
       const inv=await this.inventory(),tasks=this.plan(inv);
       if(SyncCore.fingerprint(tasks,this.cfg.rootId,this.policy())!==this.previewed.digest)throw Error('Local or remote inventory changed. Re-review before applying.');
       if(tasks.some(t=>t.action==='BLOCK'))throw Error('Missing/invisible tracked items: cannot apply.');
-      if(this.cfg.initializedRoot!==this.cfg.rootId && this.cfg.initMode==='drive' && inv.tree.files.size===0 && inv.local.size>0 && !this.cfg.ownRoot)throw Error('Drive-first cannot verify an empty externally managed root. Select individual files with Google Picker first.');
+      if(this.cfg.initializedRoot!==this.cfg.rootId && this.cfg.initMode==='drive' && inv.tree.files.size===0 && inv.local.size>0 && !this.cfg.ownRoot && this.cfg.accessMode!=='shared')throw Error('Drive-first cannot verify an empty externally managed root. Select individual files with Google Picker first.');
       const init=this.cfg.initializedRoot!==this.cfg.rootId;
-      if(init&&!this.cfg.ownRoot&&Object.keys(this.cfg.selectedFiles||{}).length===0){
+      if(init&&!this.cfg.ownRoot&&this.cfg.accessMode!=='shared'&&Object.keys(this.cfg.selectedFiles||{}).length===0){
         throw Error('既存のDriveフォルダ: ファイルへの個別許可が0件です。見えないファイルを空と誤認する危険があるため、初回同期を停止しました。');
       }
       const remoteWrites=tasks.filter(t=>t.action==='local-to-drive');
       if(remoteWrites.length && !this.cfg.allowRemoteWrites)throw Error('Enable explicit Drive write permission before applying.');
-      if(remoteWrites.some(t=>!this.cfg.ownRoot && (!t.remote || !this.cfg.selectedFiles[t.remoteId])))throw Error('External Drive roots allow updates ONLY to files individually granted through Google Picker; new file creation is blocked.');
+      if(remoteWrites.some(t=>this.cfg.accessMode!=='shared'&&!this.cfg.ownRoot && (!t.remote || !this.cfg.selectedFiles[t.remoteId])))throw Error('External Drive roots allow updates ONLY to files individually granted through Google Picker; new file creation is blocked.');
       // New files created by third-party apps may be invisible. The app-owned root is a necessary, not sufficient, safeguard.
       if(init && this.cfg.initMode==='drive' && remoteWrites.length)throw Error('Drive-first must not write to remote');
       // Execution is intentionally serial, with per-file fresh checks to catch third-party edits.
