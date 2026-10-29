@@ -189,6 +189,7 @@ const DEFAULTS={
   autoMinutes:0,autoEnabled:false,autoRemoteWrites:false,syncOnStartup:false,maxFileSizeMB:20,
   // The drive.file scope never guarantees folder-complete visibility. Keep writes off until explicit opt-in.
   allowRemoteWrites:false,
+  lastAuthCheck:0,lastAuthError:'',lastSyncAt:0,lastSyncResult:'',lastSyncError:'',pendingByMode:{}
 };
 const randomId = () => b64(crypto.getRandomValues(new Uint8Array(9)));
 const sha256 = async data => b64(new Uint8Array(await crypto.subtle.digest('SHA-256',data)));
@@ -201,9 +202,9 @@ function friendlyCounts(counts){return Object.entries(counts).map(([k,v])=>k+' '
 class GSyncLimited extends Plugin {
   async onload(){
     const saved=await this.loadData()||{};
-    this.cfg={...DEFAULTS,...saved,rules:{...(saved.rules||{})},state:saved.state||{},selectedFiles:saved.selectedFiles||{},protectedLocal:saved.protectedLocal||[]};
+    this.cfg={...DEFAULTS,...saved,rules:{...(saved.rules||{})},state:saved.state||{},selectedFiles:saved.selectedFiles||{},protectedLocal:saved.protectedLocal||[],pendingByMode:saved.pendingByMode||{}};
     this.liveAccessToken='';this.accessExpiry=0;this.busy=false;this.previewed=null;this.lastSync=0;
-    this.drive=new DriveIO(()=>this.getAccess(),requestUrl);
+    this.drive=new DriveIO(()=>this.getAccess(),requestUrl);this.preparedAuth={};this.authPreparing={};
     this.tab=new LimitedSettings(this.app,this);this.addSettingTab(this.tab);
     this.addCommand({id:'limited-preview',name:'Review proposed Drive sync (no changes)',callback:()=>void this.preview()});
     this.addCommand({id:'limited-apply',name:'Apply reviewed sync plan',callback:()=>void this.apply()});
@@ -215,25 +216,75 @@ class GSyncLimited extends Plugin {
   }
   async save(){await this.saveData(this.cfg);}
   invalidate(){this.previewed=null;}
-  async requestSignIn(pickMode='folder'){
-    if(pickMode==='files' && !this.cfg.rootId)throw Error('Select a root folder first.');
-    if(!this.cfg.clientId||!this.cfg.clientSecret)throw Error('OAuth client ID / secret required');
-    const tab=window.open('about:blank','_blank');
-    try{
+  async prepareAuth(pickMode='folder'){
+    if(!['folder','files'].includes(pickMode))throw Error('Invalid OAuth Picker mode');
+    if(!this.cfg.clientId||!this.cfg.clientSecret)return false;
+    if(this.authPreparing[pickMode])return this.authPreparing[pickMode];
+    const job=(async()=>{
+      const entry=this.preparedAuth[pickMode],key=this.cfg.clientId+'|'+this.cfg.redirectUri;
+      if(entry&&entry.key===key&&Date.now()-entry.pending.time<12*60000)return true;
       const {url,pending}=await oauthUrl(this.cfg.clientId,this.cfg.redirectUri,this.app.vault.getName(),pickMode);
-      this.cfg.pending=pending;await this.save();
-      if(tab)tab.location.href=url;
-      else {await navigator.clipboard.writeText(url);new Notice('Google sign-in URL copied. Open it in Safari.',8000);}
-    }catch(e){tab?.close();throw e;}
+      this.preparedAuth[pickMode]={url,pending,key};
+      this.cfg.pendingByMode[pickMode]=pending;
+      await this.save();
+      return true;
+    })();
+    this.authPreparing[pickMode]=job;
+    try{return await job;}finally{delete this.authPreparing[pickMode];}
+  }
+  async requestSignIn(pickMode='folder'){
+    if(pickMode==='files'&&!this.cfg.rootId)throw Error('先にフォルダを選択してください');
+    if(!this.cfg.clientId||!this.cfg.clientSecret)throw Error('OAuthクライアントIDとシークレットを入力してください');
+    const entry=this.preparedAuth[pickMode],key=this.cfg.clientId+'|'+this.cfg.redirectUri;
+    if(!entry||entry.key!==key||Date.now()-entry.pending.time>=12*60000){
+      void this.prepareAuth(pickMode);
+      throw Error('認証リンクを準備中です。少し経ってからもう一度押してください。');
+    }
+    // Launch during the tap, not after an async request/blank in-app tab.
+    // The saved PKCE verifier must not be regenerated during the browser trip.
+    const url=entry.url;
+    const external=globalThis.Capacitor?.Plugins?.InAppBrowser;
+    if(typeof external?.openInExternalBrowser==='function'){
+      try{
+        const promise=external.openInExternalBrowser({url});
+        Promise.resolve(promise).catch(e=>console.warn('[gsync-limited] external browser',e));
+        new Notice('外部ブラウザでGoogle認証を続けてください。',7000);
+        return;
+      }catch(e){console.warn('[gsync-limited] native browser',e);}
+    }
+    let opened;
+    try{opened=window.open(url,'_system');}catch(e){console.warn('[gsync-limited] system open',e);}
+    if(!opened)new Notice('ブラウザを開けなかった場合は「認証URLをコピー」を使ってください。',10000);
+    else new Notice('Google認証画面を開きました。アプリ内表示になる場合はURLコピーも利用できます。',8000);
+  }
+  async copySignInUrl(pickMode='folder'){
+    if(!await this.prepareAuth(pickMode))throw Error('OAuthの設定を確認してください');
+    await navigator.clipboard.writeText(this.preparedAuth[pickMode].url);
+    new Notice('認証URLをコピーしました。既定ブラウザへ貼り付けてください。',9500);
+  }
+  async verifyConnection(){
+    if(!this.cfg.refreshToken)throw Error('認証情報がありません');
+    try{
+      await this.getAccess();
+      if(this.cfg.rootId){
+        const root=await this.drive.get(this.cfg.rootId);
+        if(root.trashed||root.mimeType!==FOLDER)throw Error('同期先フォルダにアクセスできません');
+      }
+      this.cfg.lastAuthCheck=Date.now();this.cfg.lastAuthError='';
+      await this.save();new Notice('Googleとの接続を確認しました。',8000);
+    }catch(e){this.cfg.lastAuthCheck=0;this.cfg.lastAuthError=String(e.message||e);await this.save();throw e;}
+    finally{this.tab.display();}
   }
   async finishAuth(args){
-    const p=this.cfg.pending;
+    const matched=Object.entries(this.cfg.pendingByMode||{}).find(([,v])=>v.state===args.state);
+    const p=matched?.[1]||null;
     try{
       if(args.error)throw Error('Google: '+args.error);
       if(!p||Date.now()-p.time>15*60*1000||args.state!==p.state||!args.code)throw Error('Invalid/expired OAuth state');
       const result=guardTokenResponse(await requestUrl({url:TOKEN,method:'POST',contentType:'application/x-www-form-urlencoded',body:form({client_id:this.cfg.clientId,client_secret:this.cfg.clientSecret,code:args.code,code_verifier:p.verifier,redirect_uri:p.redirect,grant_type:'authorization_code'}),throw:false}),'Code exchange');
       this.liveAccessToken=result.access_token;this.accessExpiry=Date.now()+(result.expires_in-60)*1000;
       this.cfg.refreshToken=result.refresh_token||this.cfg.refreshToken;
+      this.cfg.lastAuthCheck=Date.now();this.cfg.lastAuthError='';
       const picked=String(args.picked_file_ids||'').split(',').filter(Boolean);
       const selected=await Promise.all(picked.map(id=>this.drive.get(id)));
       const folders=selected.filter(file=>file.mimeType===FOLDER);
@@ -258,8 +309,8 @@ class GSyncLimited extends Plugin {
         new Notice('Granted '+files.length+' file(s). Only individually authorized files are guaranteed visible.',12000);
       }
       this.invalidate();
-    }catch(e){new Notice('GSync Limited OAuth: '+e.message,16000);console.error('[gsync-limited]',e);}
-    finally{this.cfg.pending=null;await this.save();this.tab.display();}
+    }catch(e){this.cfg.lastAuthError=String(e.message||e);new Notice('GSync Limited OAuth: '+e.message,16000);console.error('[gsync-limited]',e);}
+    finally{if(matched){delete this.cfg.pendingByMode[matched[0]];delete this.preparedAuth[matched[0]];}this.cfg.pending=null;await this.save();this.tab.display();}
   }
   async getAccess(){
     if(this.liveAccessToken&&Date.now()<this.accessExpiry)return this.liveAccessToken;
@@ -445,9 +496,9 @@ class GSyncLimited extends Plugin {
         completed++;
       }
       if(init){this.cfg.initializedRoot=this.cfg.rootId;this.cfg.protectedLocal=[...held];await this.save();}
-      this.lastSync=Date.now();
+      this.lastSync=Date.now();this.cfg.lastSyncAt=this.lastSync;this.cfg.lastSyncResult='同期 '+completed+'件（削除なし）';this.cfg.lastSyncError='';await this.save();
       new Notice('GSync Limited: applied '+completed+' actions. No deletions.',12000);
-    }catch(e){new Notice('STOPPED after '+completed+' actions: '+e.message+'; inspect backups and re-preview.',17000);console.error('[gsync-limited] apply',e);}
+    }catch(e){this.cfg.lastSyncError='中止（'+completed+'件の処理後）: '+e.message;await this.save();new Notice('STOPPED after '+completed+' actions: '+e.message+'; inspect backups and re-preview.',17000);console.error('[gsync-limited] apply',e);}
     finally{this.invalidate();this.busy=false;this.tab.display();}
   }
 }
@@ -468,15 +519,39 @@ class LimitedSettings extends PluginSettingTab {
   constructor(app,plugin){super(app,plugin);this.p=plugin;}
   display(){
     const el=this.containerEl;el.empty();const p=this.p,s=p.cfg;
-    new Setting(el).setName('GSync Limited — scoped sync').setHeading();
-    el.createEl('p',{text:'この版は drive.file のみにアクセスします。外部アプリが追加した新しいファイルは自動検出できない場合があります。同期前に Google Picker で許可して一覧を確認してください。削除同期・無確認の自動書き込みは行いません。'});
-    const input=(name,key,secret=false)=>new Setting(el).setName(name).addText(t=>{if(secret)t.inputEl.type='password';t.setValue(String(s[key]||'')).onChange(async v=>{s[key]=v.trim();p.invalidate();await p.save();});});
+    new Setting(el).setName('GSync Limited — 同期セットアップ').setHeading();
+    const date=ms=>ms?new Date(ms).toLocaleString('ja-JP'):'未確認';
+    const box=(title,detail,kind='info')=>{
+      const elem=el.createDiv({cls:'gsync-limited-status'});
+      elem.style.padding='12px';elem.style.marginBottom='8px';elem.style.borderRadius='8px';
+      elem.style.border='1px solid var(--background-modifier-border)';
+      elem.style.borderLeft='4px solid '+(kind==='ok'?'var(--color-green)':kind==='warn'?'var(--color-orange)':'var(--interactive-accent)');
+      elem.createEl('strong',{text:title});elem.createEl('div',{text:detail,cls:'setting-item-description'});
+    };
+    const hasAuth=!!s.refreshToken,hasFolder=!!s.rootId,initialized=hasFolder&&s.initializedRoot===s.rootId;
+    const grantCount=Object.keys(s.selectedFiles||{}).length;
+    const reviewed=!!(p.previewed&&Date.now()-p.previewed.at<5*60000);
+    el.createEl('p',{text:'進捗を確認して、上から順に設定してください。既存のVaultをバックアップし、差分プレビュー後に適用してください。'});
+    new Setting(el).setName('現在の状態').setHeading();
+    box('① Google認証: '+(hasAuth?'保存済み':'未認証'),hasAuth?(s.lastAuthCheck?'Google接続確認: '+date(s.lastAuthCheck):'トークンは保存済みですが接続は未確認'):'クライアント設定とGoogleログインが必要です。',hasAuth&&s.lastAuthCheck?'ok':'warn');
+    if(s.lastAuthError)box('前回の認証エラー',s.lastAuthError,'warn');
+    box('② Driveフォルダ: '+(hasFolder?'選択済み':'未選択'),hasFolder?s.rootName+'（'+(s.ownRoot?'専用':'外部管理')+'）':'フォルダを1つ選択してください。',hasFolder?'ok':'warn');
+    box('③ 明示的に許可した既存ファイル: '+grantCount+' 件','フォルダ選択だけでは全ファイルへの権限は取得できません。外部アプリが新たに追加したファイルは再許可が必要です。','warn');
+    box('④ 初回同期: '+(initialized?'初期化済み':'未完了'),initialized?'次は差分確認で変更を確認してください。':'初回の正本とファイル保持ルールを設定してください。',initialized?'ok':'warn');
+    box('⑤ 最終同期: '+date(s.lastSyncAt),(s.lastSyncResult||'未実行')+(s.lastSyncError?' / エラー: '+s.lastSyncError:''),s.lastSyncError?'warn':s.lastSyncAt?'ok':'info');
+    box('次にすること',!hasAuth?'OAuthを設定しフォルダ選択からGoogleログイン':!hasFolder?'Driveのフォルダを選択':grantCount===0&&!s.ownRoot?'既存ファイルを許可（0件のまま初期同期しない）':!reviewed?'同期ルールを確認して差分をプレビュー':'プレビューで予定操作を確認して適用');
+    new Setting(el).setName('接続テスト').setDesc('保存済みトークンを実際に検証します。').addButton(b=>b.setButtonText('Google接続を確認').setDisabled(!hasAuth).onClick(()=>void p.verifyConnection().catch(e=>new Notice('接続失敗: '+e.message,12000))));
+    new Setting(el).setName('① Google認証・同期フォルダ').setHeading();
+    const input=(name,key,secret=false)=>new Setting(el).setName(name).addText(t=>{if(secret)t.inputEl.type='password';t.setValue(String(s[key]||'')).onChange(async v=>{s[key]=v.trim();p.preparedAuth={};p.cfg.pendingByMode={};p.invalidate();await p.save();void p.prepareAuth('folder').catch(e=>console.warn('[gsync-limited] prepare',e));});});
     input('OAuth client ID','clientId');input('OAuth client secret','clientSecret',true);input('Sign-in redirect page','redirectUri');
-    new Setting(el).setName('① 同期先フォルダを選択').setDesc('フォルダのみ表示。1つ選択します。フォルダへの許可は子ファイルへ自動的に広がりません。').addButton(b=>b.setButtonText('フォルダを選ぶ').onClick(()=>void p.requestSignIn('folder').catch(e=>new Notice(e.message,10000))));
-    new Setting(el).setName('② 既存ファイルを個別許可').setDesc('Driveに保存済みのファイルは別途許可してください。外部アプリが今後追加するファイルも自動許可されません。').addButton(b=>b.setButtonText('ファイルを追加許可').setDisabled(!s.rootId).onClick(()=>void p.requestSignIn('files').catch(e=>new Notice(e.message,10000))));
-    new Setting(el).setName('認証状態').setDesc(s.refreshToken?'Refresh token saved on this device':'Not authenticated');
-    new Setting(el).setName('Driveルート').setDesc((s.rootName||'未設定')+' / '+(s.rootId||'')+' / '+(s.ownRoot?'プラグイン所有':'外部管理（書込禁止）'));
-    new Setting(el).setName('新規の専用Driveルートを作成').addButton(b=>b.setButtonText('専用フォルダを作成').onClick(()=>void p.createOwnRoot().catch(e=>new Notice(e.message,12000))));
+    void p.prepareAuth('folder').catch(e=>console.warn('[gsync-limited] prepare',e));
+    if(hasFolder)void p.prepareAuth('files').catch(e=>console.warn('[gsync-limited] prepare files',e));
+    new Setting(el).setName('同期先フォルダを選択').setDesc('フォルダを1つ選択します。可能であれば既定ブラウザを使用します。').addButton(b=>b.setButtonText('フォルダを選ぶ').onClick(()=>void p.requestSignIn('folder').catch(e=>new Notice(e.message,10000))));
+    new Setting(el).setName('ブラウザで認証できない場合').setDesc('URLをコピーし、既定のブラウザで開けます。').addButton(b=>b.setButtonText('認証URLをコピー').onClick(()=>void p.copySignInUrl('folder').catch(e=>new Notice(e.message,10000))));
+    new Setting(el).setName('③ 既存ファイルにアクセスを許可').setDesc('個別に許可。外部アプリが新たに追加したファイルは自動許可されません。').addButton(b=>b.setButtonText('ファイルを追加許可').setDisabled(!hasFolder).onClick(()=>void p.requestSignIn('files').catch(e=>new Notice(e.message,10000))));
+    new Setting(el).setName('ファイル許可URLをコピー').addButton(b=>b.setButtonText('コピー').setDisabled(!hasFolder).onClick(()=>void p.copySignInUrl('files').catch(e=>new Notice(e.message,10000))));
+    new Setting(el).setName('新規の専用Driveルートを作成').setDesc('既存フォルダとは別の保存先を作ります。').addButton(b=>b.setButtonText('専用フォルダを作成').setDisabled(!hasAuth||hasFolder).onClick(()=>void p.createOwnRoot().catch(e=>new Notice(e.message,12000))));
+    new Setting(el).setName('④ 同期ルールを設定').setHeading();
     new Setting(el).setName('初回の正本（同名ファイルの処理）').addDropdown(d=>d.addOptions({drive:'Google Drive優先',local:'iPhone優先（上書き注意）',both:'両方保護しDrive版を正本',skip:'同名を変更しない'}).setValue(s.initMode).onChange(async v=>{s.initMode=v;p.invalidate();await p.save();}));
     new Setting(el).setName('iPhoneにしかないファイル').addDropdown(d=>d.addOptions({keep:'iPhoneに保持（推奨）',upload:'Driveに追加（専用フォルダのみ）'}).setValue(s.localOnly).onChange(async v=>{s.localOnly=v;p.invalidate();await p.save();}));
     new Setting(el).setName('Driveにしかないファイル').addDropdown(d=>d.addOptions({download:'iPhoneへダウンロード',keep:'Driveのみに残す'}).setValue(s.remoteOnly).onChange(async v=>{s.remoteOnly=v;p.invalidate();await p.save();}));
@@ -494,8 +569,9 @@ class LimitedSettings extends PluginSettingTab {
     new Setting(el).setName('自動でDriveへ書き込む').setDesc('初期OFF。専用ルート＋Drive書き込み許可が必要。外部アプリと同時編集の完全排他はできません。').addToggle(t=>t.setValue(!!s.autoRemoteWrites).onChange(async v=>{s.autoRemoteWrites=v;p.invalidate();await p.save();}));
     new Setting(el).setName('起動時に自動同期').addToggle(t=>t.setValue(!!s.syncOnStartup).onChange(async v=>{s.syncOnStartup=v;await p.save();}));
     new Setting(el).setName('最大ファイルサイズ（MB）').addText(t=>t.setValue(String(s.maxFileSizeMB)).onChange(async v=>{const n=Number.parseInt(v,10);if(Number.isFinite(n)&&n>0){s.maxFileSizeMB=n;p.invalidate();await p.save();}}));
-    new Setting(el).setName('同期プレビュー').setDesc('各ファイルの予定操作と件数を表示。実データは変更しません。').addButton(b=>b.setButtonText('差分を確認').onClick(()=>void p.preview()));
-    new Setting(el).setName('プレビュー済みの計画を適用').setDesc('一度差分を確認し、5分以内に実行してください。外部編集が挟まると中断します。').addButton(b=>b.setButtonText('確認済み計画を実行').setDisabled(!p.previewed).onClick(()=>void p.apply()));
+    new Setting(el).setName('⑤ 差分確認と実行').setHeading();
+    new Setting(el).setName('同期プレビュー').setDesc('各ファイルの予定操作と件数を表示。実データは変更しません。').addButton(b=>b.setButtonText('差分を確認').setDisabled(!hasAuth||!hasFolder).onClick(()=>void p.preview()));
+    new Setting(el).setName('プレビュー済みの計画を適用').setDesc('一度差分を確認し、5分以内に実行してください。外部編集が挟まると中断します。').addButton(b=>b.setButtonText('確認済み計画を実行').setDisabled(!reviewed).onClick(()=>void p.apply()));
     new Setting(el).setName('初回状態').setDesc(s.rootId&&s.initializedRoot===s.rootId?'初期化済み':'未初期化（最初の適用で選択ルールを採用）');
     new Setting(el).setName('同期履歴の再作成').setDesc('同期状態を解除します。ファイルは削除しません。先にバックアップしてください。').addButton(b=>b.setButtonText('履歴をクリア').onClick(async()=>{s.state={};s.initializedRoot='';s.protectedLocal=[];p.invalidate();await p.save();new Notice('同期履歴をクリアしました。');}));
   }
