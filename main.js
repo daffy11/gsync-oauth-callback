@@ -273,7 +273,7 @@ class GSyncLimited extends Plugin {
     if(!['limited','shared'].includes(mode))throw Error('Invalid sync mode');
     const from=this.cfg.accessMode||'limited';
     if(mode===from)return;
-    const fields=['refreshToken','rootId','rootName','ownRoot','selectedFiles','initializedRoot','state','protectedLocal','allowRemoteWrites','lastScanAt','lastScanRoot','lastVisibleFileCount','lastVisibleFolderCount','lastSyncAt','lastSyncResult','lastSyncError','expectedDedicatedEmail','connectedAccountEmail','authGrantedAt','needsReauth','reauthReason','lastAuthCheck'];
+    const fields=['refreshToken','rootId','rootName','ownRoot','selectedFiles','initializedRoot','state','protectedLocal','allowRemoteWrites','lastScanAt','lastScanRoot','lastVisibleFileCount','lastVisibleFolderCount','lastSyncAt','lastSyncResult','lastSyncError','expectedDedicatedEmail','connectedAccountEmail','authGrantedAt','needsReauth','reauthReason','lastAuthCheck','lastAuthError','lastExpiryAlertAt'];
     this.cfg.modeProfiles=this.cfg.modeProfiles||{};
     this.cfg.modeProfiles[from]=Object.fromEntries(fields.map(k=>[k,this.cfg[k]]));
     const target=this.cfg.modeProfiles[mode]||{};
@@ -735,7 +735,7 @@ class LimitedSettings extends PluginSettingTab {
     new Setting(el).setName('現在のセットアップ状況').setHeading();
     box('① Google認証: '+(s.needsReauth?'更新が必要':hasAuth?'済み':'未完了'),s.needsReauth?'Google認証が失効しました。下の「再認証」を実行してください。':hasAuth?(s.lastAuthCheck?'Google接続確認: '+date(s.lastAuthCheck):'トークンは保存済み。接続テストが必要です。'):'OAuth設定とログインが必要です。',hasAuth&&s.lastAuthCheck&&!s.needsReauth?'ok':'warn');
     if(s.lastAuthError)box('認証の前回エラー',s.lastAuthError,'warn');
-    box('② 同期先フォルダ: '+(hasFolder?'選択済み':'未選択'),hasFolder?s.rootName+'（'+(s.ownRoot?'プラグイン専用':'既存のDriveフォルダ')+'）':'Google Driveからフォルダを選択してください。',hasFolder?'ok':'warn');
+    box('② 同期先フォルダ: '+(hasFolder?'選択済み':'未選択'),hasFolder?s.rootName+'（'+(shared?'専用アカウントへの共有フォルダ':s.ownRoot?'プラグイン専用':'既存のDriveフォルダ')+'）':'Google Driveからフォルダを選択してください。',hasFolder?'ok':'warn');
     if(shared)box('③ 共有フォルダの内容',hasFolder?(scanned?'取得済み: '+visible+'件（'+date(s.lastScanAt)+'）':'一覧をまだ取得していません'):'共有フォルダを指定してください',hasFolder&&scanned?'ok':'warn');
     else box('③ ファイルへの個別許可: '+grantCount+'件',hasFolder?(scanned?'APIから見えたファイル: '+visible+'件（'+date(s.lastScanAt)+'）。':'フォルダ内一覧は未確認です。')+' 0件はDriveのファイル総数ではありません。':'フォルダ選択後に確認できます。',grantCount>0||s.ownRoot?'ok':'warn');
     if(s.lastScanError)box('ファイル読取テストのエラー',s.lastScanError,'warn');
