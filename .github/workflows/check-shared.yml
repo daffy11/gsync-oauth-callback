@@ -1,25 +1,19 @@
-name: Check shared-folder integration
+name: Shared-folder regression and bug-hunt
 on:
   push:
     branches: ['fix/shared-folder-auth-0.3']
-    paths: ['scripts/shared-folder-mode.py','.github/workflows/check-shared.yml']
+    paths: ['main.js','scripts/shared-mode-tests.cjs','.github/workflows/check-shared.yml']
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 scripts/shared-folder-mode.py
-      - run: node --check main.js
-      - run: node scripts/release-smoke.cjs
-      - name: Commit generated integration branch build
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add main.js
-          if ! git diff --staged --quiet; then
-            git commit -m 'Build shared-folder integration candidate'
-            git push origin HEAD:fix/shared-folder-auth-0.3
-          fi
+      - name: Syntax
+        run: node --check main.js
+      - name: Existing sync safety regressions
+        run: node scripts/release-smoke.cjs
+      - name: Shared-folder and OAuth expiry regressions
+        run: node scripts/shared-mode-tests.cjs
