@@ -1,9 +1,9 @@
 {
   "id": "gsync-limited",
   "name": "GSync Limited",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "minAppVersion": "1.6.6",
-  "description": "Selective Google Drive drive.file synchronization with per-folder conflict rules, previews, backups, and optional auto-sync.",
+  "description": "Dedicated-account shared-folder recursive Google Drive sync with scoped target checks, manual conflict review, and OAuth expiry warnings.",
   "author": "Community adaptation of GSync (unofficial)",
   "isDesktopOnly": false
 }
