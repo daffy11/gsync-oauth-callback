@@ -302,9 +302,19 @@ class GSyncLimited extends Plugin {
       }
     }
   }
+  async assertDedicatedAccount(){
+    if(this.cfg.accessMode!=='shared')return;
+    const expected=String(this.cfg.expectedDedicatedEmail||'').trim().toLowerCase();
+    if(!expected)throw Error('同期専用アカウントのメールアドレスが未設定です');
+    const result=await this.drive.about();
+    const actual=String(result.user?.emailAddress||'').trim().toLowerCase();
+    if(actual!==expected)throw Error('安全停止: 現在のGoogle認証アカウントが専用アカウントと一致しません（'+(actual||'不明')+'）');
+    this.cfg.connectedAccountEmail=actual;
+  }
   async selectSharedRoot(input){
     if(this.cfg.accessMode!=='shared')throw Error('共有フォルダモードでのみ指定できます');
     if(this.cfg.needsReauth||!this.cfg.refreshToken)throw Error('先に専用Googleアカウントで認証してください');
+    await this.assertDedicatedAccount();
     const id=parseSharedFolderId(input);
     const f=await this.drive.get(id);
     if(f.trashed||f.mimeType!==FOLDER)throw Error('アクセス可能なフォルダではありません');
@@ -321,6 +331,7 @@ class GSyncLimited extends Plugin {
   }
   async discoverSharedFolders(){
     if(this.cfg.accessMode!=='shared')throw Error('共有フォルダモードでのみ利用できます');
+    await this.assertDedicatedAccount();
     this.sharedCandidates=await this.drive.listSharedFolders();
     this.tab.display();
     new Notice('共有フォルダを '+this.sharedCandidates.length+' 件取得しました。',8000);
@@ -397,6 +408,7 @@ class GSyncLimited extends Plugin {
   async scanRemoteReadOnly(){
     if(!this.cfg.refreshToken||!this.cfg.rootId)throw Error('先にGoogle認証とフォルダ選択が必要です。');
     try{
+      await this.assertDedicatedAccount();
       const tree=await this.drive.tree(this.cfg.rootId,this.cfg.accessMode==='shared'?{}:this.cfg.selectedFiles);
       this.cfg.lastScanAt=Date.now();
       this.cfg.lastScanRoot=this.cfg.rootId;
@@ -512,6 +524,7 @@ class GSyncLimited extends Plugin {
   }
   async inventory(){
     if(!this.cfg.refreshToken||!this.cfg.rootId)throw Error('Sign in and select/create one Drive root folder first.');
+    await this.assertDedicatedAccount();
     const tree=await this.drive.tree(this.cfg.rootId,this.cfg.accessMode==='shared'?{}:this.cfg.selectedFiles);
     const local=await this.localInventory();
     for(const [path,r] of tree.files){
@@ -772,7 +785,7 @@ class LimitedSettings extends PluginSettingTab {
     const advanced=el.createEl('details'); advanced.createEl('summary',{text:'任意設定・高度な設定（通常は変更不要）'});
     if(!shared)new Setting(advanced).setName('新しい専用Driveフォルダを作成').setDesc('既存フォルダを使う場合は不要。').addButton(b=>b.setButtonText('専用フォルダを作成').setDisabled(!hasAuth||hasFolder).onClick(()=>void p.createOwnRoot().catch(e=>new Notice(e.message,12000))));
     new Setting(advanced).setName('通常同期での両側編集時').addDropdown(d=>d.addOptions({both:'両方バックアップ・Driveを正本',drive:'Driveを正本（ローカル退避）',local:'iPhone優先（Drive退避）',skip:'変更せず保留'}).setValue(s.conflict).onChange(async v=>{s.conflict=v;p.invalidate();await p.save();}));
-    new Setting(advanced).setName('Driveへの書き込みを許可').setDesc('初期値OFF。外部管理ルートではPickerで個別許可した既存ファイルへの手動更新のみ可。新規アップロードは禁止。').addToggle(t=>t.setValue(s.allowRemoteWrites).onChange(async v=>{s.allowRemoteWrites=v;p.invalidate();await p.save();}));
+    new Setting(advanced).setName('Driveへの書き込みを許可').setDesc(shared?'初期値OFF。共有フォルダ内の更新・作成を明示的に許可します。':'初期値OFF。外部管理ルートは個別許可した既存ファイルのみ更新できます。').addToggle(t=>t.setValue(s.allowRemoteWrites).onChange(async v=>{s.allowRemoteWrites=v;p.invalidate();await p.save();}));
     new Setting(advanced).setName('除外パス（同期しない）').setDesc('1行に1件。フォルダは末尾 /、例: Archives/、ファイル種類 *.tmp').addTextArea(t=>{t.setValue(s.excludes).onChange(async v=>{s.excludes=v;p.invalidate();await p.save();});});
     new Setting(advanced).setName('フォルダ別ルール').setDesc('変更しないフォルダは「触らない」。優先先は競合時に適用し、それ以外の新しい変更は双方向に反映します。').setHeading();
     new Setting(advanced).setName('任意のフォルダをルールへ追加').setDesc('例えば Archives、Notes/Private など。フォルダは手入力で追加可能です。').addText(t=>t.setPlaceholder('Folder/Subfolder').onChange(v=>{p.folderDraft=v.trim().replace(/\\/g,'/').replace(/^\/+|\/+$/g,'');})).addButton(b=>b.setButtonText('追加').onClick(async()=>{const name=p.folderDraft||'';if(!SyncCore.cleanPath(name)){new Notice('Invalid path');return;}s.rules[name]='skip';p.invalidate();await p.save();this.display();}));
@@ -782,7 +795,7 @@ class LimitedSettings extends PluginSettingTab {
     }
     new Setting(advanced).setName('自動同期（明示的に有効化した場合のみ）').setDesc('初期OFF。Obsidianが開いている間のみ差分を検証・同期。競合は双方退避。').addToggle(t=>t.setValue(!!s.autoEnabled).onChange(async v=>{s.autoEnabled=v;p.invalidate();await p.save();}));
     new Setting(advanced).setName('自動同期の間隔（分）').setDesc('0で無効。デフォルト無効。').addText(t=>t.setValue(String(s.autoMinutes)).onChange(async v=>{const n=Number.parseInt(v,10);s.autoMinutes=Number.isFinite(n)&&n>0?n:0;p.invalidate();await p.save();}));
-    new Setting(advanced).setName('自動でDriveへ書き込む').setDesc('初期OFF。専用ルート＋Drive書き込み許可が必要。外部アプリと同時編集の完全排他はできません。').addToggle(t=>t.setValue(!!s.autoRemoteWrites).onChange(async v=>{s.autoRemoteWrites=v;p.invalidate();await p.save();}));
+    new Setting(advanced).setName('自動でDriveへ書き込む').setDesc(shared?'初期OFF。共有フォルダ内の更新に限ります。外部編集との同時操作を完全にはロックできません。':'初期OFF。専用ルート＋書き込み許可が必要です。').addToggle(t=>t.setValue(!!s.autoRemoteWrites).onChange(async v=>{s.autoRemoteWrites=v;p.invalidate();await p.save();}));
     new Setting(advanced).setName('起動時に自動同期').addToggle(t=>t.setValue(!!s.syncOnStartup).onChange(async v=>{s.syncOnStartup=v;await p.save();}));
     new Setting(advanced).setName('最大ファイルサイズ（MB）').addText(t=>t.setValue(String(s.maxFileSizeMB)).onChange(async v=>{const n=Number.parseInt(v,10);if(Number.isFinite(n)&&n>0){s.maxFileSizeMB=n;p.invalidate();await p.save();}}));
     new Setting(el).setName('必須設定 4/4 — 差分の確認と実行').setHeading();
