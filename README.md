@@ -1,19 +1,50 @@
-# GSync Limited 0.2.0 (experimental)
+# GSync Limited 0.3.0 — shared-folder beta
 
-A separate, unverified Obsidian community plugin prototype with Google Drive `drive.file` access and an optional limited-scope Google OnePick login. It is **not** the official GSync.
+非公式のObsidian同期プラグインです。元の[GSync](https://github.com/dg0988/ObsidianGSync)（MITライセンス）をもとにした実験的な改修版です。
 
-**Do not use on your primary vault without full backups.** Google Advanced Protection authentication and iPhone real-world synchronization have not been verified.
+**現在の版はベータ版です。実際のiPhone・Google OAuth・共有Driveフォルダでのエンドツーエンド試験はまだ完了していません。初回同期は必ずバックアップ済みのテスト用Vaultで行ってください。**
 
-Features: first-sync authority selection (Drive/local/both/skip), per-folder conflict rules, preview-and-confirm, local backups before overwrite, no deletion, no automatic sync by default, external modification detection for visible files. Google `drive.file` does **not** guarantee that selecting a folder grants access to every file subsequently added by other apps.
+## 推奨構成：専用Googleアカウント＋共有フォルダ
 
-The OAuth callback is hosted at https://daffy11.github.io/gsync-oauth-callback/limited-callback.html and exchanges the code using the Obsidian app protocol.
+- **メインGoogleアカウント**: 元のGoogle Drive for desktopでVaultを管理する。メインアカウントの高度な保護機能は維持する。
+- **同期専用Googleアカウント**: メインから対象Vaultフォルダだけを「編集者」として共有してもらう。その他の個人データは入れない。
+- **iPhone**: GSync Limitedに**専用Googleアカウント**でサインインする。プラグインが扱う同期先はユーザーが指定した共有フォルダID以下だけとする。
 
-## iPhone installation
-Use the Obsidian BRAT plugin, then add this public GitHub repository `daffy11/gsync-oauth-callback` after the release is published. BRAT requires release assets `main.js` and `manifest.json`.
+注意：OAuthの `https://www.googleapis.com/auth/drive` は**同期専用Googleアカウントからアクセス可能なDrive全体**への権限です。GoogleのOAuthスコープそのものを共有フォルダだけに制限する仕組みではありません。メインアカウントでは**絶対に認証しない**ことを推奨します。共有フォルダ配下の項目は原則権限を継承しますが、アクセス制限付きサブフォルダ等は例外です。
 
-## Important
-This repository also hosts the user's existing static OAuth callback page. Plugin artifacts do not modify the original `callback.html`. No OAuth secret or refresh token belongs in the repository.
+## iPhoneの初期セットアップ
 
-Source base: [dg0988/ObsidianGSync](https://github.com/dg0988/ObsidianGSync), MIT license.
+1. メインGoogleアカウントのDriveで同期元フォルダを開き、専用Googleアカウントを**編集者**として共有します。
+2. Google CloudのOAuth同意画面が「テスト中」の場合、**専用Googleアカウントをテストユーザーに追加**します。OAuthクライアントは既存のWebアプリ用のものを使えます。承認済みリダイレクトURIは `https://daffy11.github.io/gsync-oauth-callback/limited-callback.html` です。
+3. iPhoneのObsidianでBRATを使い、このリポジトリ `daffy11/gsync-oauth-callback` を導入・更新します。プラグインの表示版数は `0.3.0` です。
+4. GSync Limited設定で、**同期方式 → 専用Googleアカウント＋共有フォルダ**を選択します。**専用アカウントのメールアドレス**を入力し、「専用アカウントでログイン」を実行します。
+5. メインアカウントで共有したフォルダのURL（例：`https://drive.google.com/drive/folders/<フォルダID>`）を「共有フォルダのURLまたはID」に入力して登録します。または「共有フォルダを探す」を使用します。
+6. **読取テスト**でフォルダ配下が取得できるか確認します。初回は**Google Drive優先**、iPhoneだけにあるファイルは**保持**が初期値です。
+7. 双方のVaultを別途バックアップした後、「差分を確認」で操作内容を確認し、「確認済み計画を実行」を選びます。**自動同期とDriveへの書き込みは初期状態で無効**です。
 
-Release asset integrity: SHA256 of `main.js` = `dff892b1898b48d8cfa21fdb4f8fa38ef3ab5f96928aa86fe46e111b7cdbdcf3`.
+## OAuthが7日程度で切れたとき
+
+Google CloudのOAuthアプリが「外部 / テスト中」の場合、Drive APIなどを要求するリフレッシュトークンは通常**7日で失効**します。Obsidianが開いた際または起動中の検査で、Googleから `invalid_grant` が返ったら同期を停止し、**「Google認証を更新」**を表示します。
+
+この仕組みで7日間の有効期限そのものを延長することはできません。Obsidianを閉じている間のiOSプッシュ通知はしません。Google側でOAuth同意画面を本番公開すると7日制限の対象外になり得ますが、審査・警告・権限の要件は別問題です。
+
+## バグ防止策・制限
+
+- 誤ったGoogleアカウントで認証した場合はアカウント検証で拒否します。
+- 共有フォルダの編集権限を確認し、フォルダ外へ移動したファイルの更新をブロックします。
+- 初期同期時の優先先、フォルダ別競合処理、差分プレビュー、上書き前のローカルバックアップを提供します。ファイル削除操作は実装していません。
+- Windowsなど他アプリが行ったファイル更新をDriveの変更情報で検出します。ただし複数クライアントが完全同時に書き込む操作をトランザクションで防止することはできません。
+- Google Docs等のネイティブ形式、Obsidianの隠し設定ファイル、アクセス制限付きサブフォルダは完全同期の対象になりません。
+- **ローカルとモックDrive APIのテスト成功は、実機での正常動作保証ではありません。**
+
+## 従来の drive.file モード
+
+設定から「個別ファイル許可（旧方式）」へ切り替えられます。旧方式の認証・同期データは別途保存されます。旧方式では、フォルダを選択しただけで配下のすべてのファイルが許可されることはありません。
+
+## ソース / インストール
+
+- リポジトリ: https://github.com/daffy11/gsync-oauth-callback
+- BRAT用Release: https://github.com/daffy11/gsync-oauth-callback/releases/tag/0.3.0
+- Google認証コールバック: https://daffy11.github.io/gsync-oauth-callback/limited-callback.html
+
+**認証用シークレット、アクセストークン、リフレッシュトークン、プライベートなVaultの中身をGitHubへコミットしないでください。**
