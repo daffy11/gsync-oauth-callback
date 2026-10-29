@@ -713,21 +713,28 @@ class LimitedSettings extends PluginSettingTab {
     const scanned=hasFolder&&s.lastScanAt>0&&s.lastScanRoot===s.rootId;
     const visible=scanned?s.lastVisibleFileCount:null;
     el.createEl('p',{text:'初回同期は自動で実行されません。①アクセス権を確認 → ②同期対象を確認 → ③ルールを選択 → ④差分確認 → ⑤適用、の順に進めます。'});
+    new Setting(el).setName('同期方式').setDesc('新方式は専用Googleアカウントの共有フォルダを使用します。OAuthには専用アカウントのDrive全体への権限が必要です。').addDropdown(d=>d.addOptions({shared:'専用Googleアカウント＋共有フォルダ',limited:'個別ファイル許可（旧方式）'}).setValue(s.accessMode||'limited').onChange(v=>void p.switchAccessMode(v)));
+    const shared=(s.accessMode||'limited')==='shared';
     new Setting(el).setName('現在のセットアップ状況').setHeading();
-    box('① Google認証: '+(hasAuth?'済み':'未完了'),hasAuth?(s.lastAuthCheck?'Googleへの接続確認: '+date(s.lastAuthCheck):'トークンはあります。接続テストで確認してください。'):'OAuth設定とログインが必要です。',hasAuth&&s.lastAuthCheck?'ok':'warn');
+    box('① Google認証: '+(s.needsReauth?'更新が必要':hasAuth?'済み':'未完了'),s.needsReauth?'Google認証が失効しました。下の「再認証」を実行してください。':hasAuth?(s.lastAuthCheck?'Google接続確認: '+date(s.lastAuthCheck):'トークンは保存済み。接続テストが必要です。'):'OAuth設定とログインが必要です。',hasAuth&&s.lastAuthCheck&&!s.needsReauth?'ok':'warn');
     if(s.lastAuthError)box('認証の前回エラー',s.lastAuthError,'warn');
     box('② 同期先フォルダ: '+(hasFolder?'選択済み':'未選択'),hasFolder?s.rootName+'（'+(s.ownRoot?'プラグイン専用':'既存のDriveフォルダ')+'）':'Google Driveからフォルダを選択してください。',hasFolder?'ok':'warn');
-    box('③ ファイルへの個別許可: '+grantCount+'件',hasFolder?(scanned?'Google APIから今回見えたファイル: '+visible+'件（'+date(s.lastScanAt)+'）。':'フォルダのファイル一覧は未確認です。')+' 0件はDriveのファイル総数ではありません。':'フォルダ選択後に確認できます。',grantCount>0||s.ownRoot?'ok':'warn');
+    if(shared)box('③ 共有フォルダの内容',hasFolder?(scanned?'取得済み: '+visible+'件（'+date(s.lastScanAt)+'）':'一覧をまだ取得していません'):'共有フォルダを指定してください',hasFolder&&scanned?'ok':'warn');
+    else box('③ ファイルへの個別許可: '+grantCount+'件',hasFolder?(scanned?'APIから見えたファイル: '+visible+'件（'+date(s.lastScanAt)+'）。':'フォルダ内一覧は未確認です。')+' 0件はDriveのファイル総数ではありません。':'フォルダ選択後に確認できます。',grantCount>0||s.ownRoot?'ok':'warn');
     if(s.lastScanError)box('ファイル読取テストのエラー',s.lastScanError,'warn');
     box('④ 初回同期: '+(initialized?'実行済み':'まだ実行していません'),initialized?'初回ルール適用済み。変更は差分確認から実行してください。':'「Drive優先」「iPhoneのみ保持」などを選び、差分を確認してから実行します。',initialized?'ok':'warn');
     box('⑤ 最終同期: '+(s.lastSyncAt?date(s.lastSyncAt):'未実行'),(s.lastSyncResult||'データの変更なし')+(s.lastSyncError?' / エラー: '+s.lastSyncError:''),s.lastSyncError?'warn':'info');
-    const next=!hasAuth?'Google OAuth設定とログインを完了':!hasFolder?'Driveフォルダを選択':!scanned?'「見えるファイル数を調べる」を実行':!s.ownRoot&&grantCount===0?'「既存ファイルにアクセスを許可」で対象ファイルを選択':!reviewed?'「初回同期の方針」を確認後、差分をプレビュー':'プレビュー内容を確認して適用';
+    const next=s.needsReauth?'Google認証を更新':shared&&!s.expectedDedicatedEmail?'専用アカウントのメールアドレスを入力':!hasAuth?'Googleアカウントでログイン':!hasFolder?(shared?'共有フォルダのURLまたはIDを指定':'Driveフォルダを選択'):!scanned?'ファイル一覧を読み取る':!shared&&!s.ownRoot&&grantCount===0?'既存ファイルを個別に許可':!reviewed?'差分プレビューを確認':'差分を適用';
     box('次にすること',next);
-    if(hasFolder&&!s.ownRoot){
+    if(hasFolder&&!s.ownRoot&&!shared){
       const caution=el.createEl('p',{text:'重要: このアプリの drive.file 権限では、フォルダ内の全ファイルを把握できません。Windowsなど別アプリが新しく追加したファイルも自動で見つかる保証はありません。現在の版で「フォルダ全体を常時自動同期できる」とは扱わないでください。'});
       caution.style.color='var(--text-warning)';
     }
-    new Setting(el).setName('接続テスト').setDesc('保存済みトークンを実際に検証します。').addButton(b=>b.setButtonText('Google接続を確認').setDisabled(!hasAuth).onClick(()=>void p.verifyConnection().catch(e=>new Notice('接続失敗: '+e.message,12000))));
+    if(shared){
+      box('認証中の専用アカウント',s.connectedAccountEmail||'まだ接続確認していません',s.connectedAccountEmail?'ok':'warn');
+      box('認証の更新',s.needsReauth?'認証が失効しました。再ログインしてください':s.testingMode?'OAuthがテスト状態なら通常7日間で更新が必要です。失効時に通知します。':'認証失効を検出した場合に再ログインを案内します。',s.needsReauth?'warn':'info');
+    }
+    new Setting(el).setName('接続テスト').setDesc('認証情報と同期先フォルダへのアクセスを検証します。').addButton(b=>b.setButtonText('Google接続を確認').setDisabled(!hasAuth||!!s.needsReauth).onClick(()=>void p.verifyConnection().catch(e=>new Notice('接続失敗: '+e.message,12000))));
     new Setting(el).setName('必須設定 1/4 — Google認証と同期先フォルダ').setHeading();
     const authOptions=el.createEl('details');const authSummary=authOptions.createEl('summary',{text:'Google Cloud OAuthの詳細設定（登録済みなら変更不要）'});authOptions.open=!s.clientId||!s.clientSecret;
     const input=(name,key,secret=false)=>new Setting(authOptions).setName(name).addText(t=>{if(secret)t.inputEl.type='password';t.setValue(String(s[key]||'')).onChange(async v=>{s[key]=v.trim();p.preparedAuth={};p.cfg.pendingByMode={};p.invalidate();await p.save();void p.prepareAuth('folder').catch(e=>console.warn('[gsync-limited] prepare',e));});});
