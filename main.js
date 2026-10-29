@@ -257,8 +257,14 @@ class GSyncLimited extends Plugin {
     const store=this.app.secretStorage;
     if(!store||typeof store.getSecret!=='function'||typeof store.setSecret!=='function')
       throw Error('GSync Limited requires Obsidian 1.11.4+ SecretStorage to keep OAuth credentials out of the synced Vault.');
-    this.localAuthKey='gsync-limited-local-oauth-v1';
-    const raw=await store.getSecret(this.localAuthKey);
+    // Random, vault-specific storage ID avoids mobile SecretStorage name collisions.
+    // This identifier is public and is intentionally kept in the Vault config.
+    if(!/^[a-f0-9]{32}$/.test(this.cfg.localSecretId||'')){
+      const bytes=crypto.getRandomValues(new Uint8Array(16));
+      this.cfg.localSecretId=Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');
+    }
+    this.localAuthKey='gsync-limited-auth-'+this.cfg.localSecretId;
+    const raw=store.getSecret(this.localAuthKey);
     let local=null;
     if(raw){
       try{local=JSON.parse(raw)}catch(e){throw Error('Local OAuth secret record is damaged; refusing to overwrite it. '+e.message)}
@@ -303,7 +309,8 @@ class GSyncLimited extends Plugin {
       profiles:Object.fromEntries(Object.entries(profiles).map(([mode,p])=>[mode,{refreshToken:p?.refreshToken||''}]))
     };
     // Write local credentials FIRST. Never downgrade to plaintext on storage failure.
-    await store.setSecret(this.localAuthKey||'gsync-limited-local-oauth-v1',JSON.stringify(auth));
+    if(!/^gsync-limited-auth-[a-f0-9]{32}$/.test(this.localAuthKey||''))throw Error('Invalid local credential storage key');
+    store.setSecret(this.localAuthKey,JSON.stringify(auth));
     const publicProfiles=Object.fromEntries(Object.entries(profiles).map(([mode,p])=>{
       const copy={...p};delete copy.refreshToken;delete copy.clientSecret;delete copy.pendingByMode;delete copy.pending;return [mode,copy];
     }));
