@@ -252,6 +252,29 @@ class GSyncLimited extends Plugin {
   async onload(){
     const saved=await this.loadData()||{};
     this.cfg={...DEFAULTS,...saved,rules:{...(saved.rules||{})},state:saved.state||{},selectedFiles:saved.selectedFiles||{},protectedLocal:saved.protectedLocal||[],pendingByMode:saved.pendingByMode||{}};
+    // Since v0.3.2 OAuth credentials and transient PKCE state never belong inside the Vault.
+    // Require Obsidian 1.11.4+ SecretStorage (local to the device, not guaranteed encrypted at rest).
+    const store=this.app.secretStorage;
+    if(!store||typeof store.getSecret!=='function'||typeof store.setSecret!=='function')
+      throw Error('GSync Limited requires Obsidian 1.11.4+ SecretStorage to keep OAuth credentials out of the synced Vault.');
+    this.localAuthKey='gsync-limited-local-oauth-v1';
+    const raw=await store.getSecret(this.localAuthKey);
+    let local=null;
+    if(raw){
+      try{local=JSON.parse(raw)}catch(e){throw Error('Local OAuth secret record is damaged; refusing to overwrite it. '+e.message)}
+      if(!local||typeof local!=='object')throw Error('Invalid local OAuth secret format');
+      // Device-local credentials win over stale copies found in a synced data.json.
+      this.cfg.refreshToken=local.refreshToken||'';
+      this.cfg.clientSecret=local.clientSecret||'';
+      this.cfg.pendingByMode=local.pendingByMode||{};
+      this.cfg.pending=local.pending||null;
+      for(const [mode,auth] of Object.entries(local.profiles||{})){
+        this.cfg.modeProfiles=this.cfg.modeProfiles||{};
+        this.cfg.modeProfiles[mode]={...(this.cfg.modeProfiles[mode]||{}),refreshToken:auth.refreshToken||''};
+      }
+    }
+    // On first upgrade, saveData below migrates any legacy credentials out of data.json.
+    await this.save();
     this.liveAccessToken='';this.accessExpiry=0;this.busy=false;this.previewed=null;this.lastSync=0;
     this.drive=new DriveIO(()=>this.getAccess(),requestUrl);this.preparedAuth={};this.authPreparing={};
     this.tab=new LimitedSettings(this.app,this);this.addSettingTab(this.tab);
@@ -267,7 +290,26 @@ class GSyncLimited extends Plugin {
     this.app.workspace.onLayoutReady(()=>window.setTimeout(()=>void this.checkAuthHealth(),2200));
     this.registerInterval(window.setInterval(()=>void this.checkAuthHealth(),6*60*60*1000));
   }
-  async save(){await this.saveData(this.cfg);}
+  async save(){
+    const store=this.app.secretStorage;
+    if(!store||typeof store.setSecret!=='function')
+      throw Error('SecretStorage unavailable. Refusing to save OAuth secrets inside Vault.');
+    const profiles=this.cfg.modeProfiles||{};
+    const auth={
+      refreshToken:this.cfg.refreshToken||'',
+      clientSecret:this.cfg.clientSecret||'',
+      pendingByMode:this.cfg.pendingByMode||{},
+      pending:this.cfg.pending||null,
+      profiles:Object.fromEntries(Object.entries(profiles).map(([mode,p])=>[mode,{refreshToken:p?.refreshToken||''}]))
+    };
+    // Write local credentials FIRST. Never downgrade to plaintext on storage failure.
+    await store.setSecret(this.localAuthKey||'gsync-limited-local-oauth-v1',JSON.stringify(auth));
+    const publicProfiles=Object.fromEntries(Object.entries(profiles).map(([mode,p])=>{
+      const copy={...p};delete copy.refreshToken;delete copy.clientSecret;delete copy.pendingByMode;delete copy.pending;return [mode,copy];
+    }));
+    const settings={...this.cfg,refreshToken:'',clientSecret:'',pending:null,pendingByMode:{},modeProfiles:publicProfiles};
+    await this.saveData(settings);
+  }
   invalidate(){this.previewed=null;}
   async switchAccessMode(mode){
     if(!['limited','shared'].includes(mode))throw Error('Invalid sync mode');
