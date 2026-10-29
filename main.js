@@ -339,6 +339,7 @@ class GSyncLimited extends Plugin {
   async prepareAuth(pickMode='folder'){
     if(!['folder','files','shared','reauth'].includes(pickMode))throw Error('Invalid OAuth mode');
     if(this.cfg.accessMode==='shared'&&pickMode!=='shared')throw Error('共有モードでは専用アカウント認証のみ使用します');
+    if(pickMode==='shared'&&!this.cfg.sharedAccountConfirmed)throw Error('共有方式にはメインと別のGoogleアカウントが必要です。先に確認欄をONにしてください。');
     if(this.cfg.accessMode!=='shared'&&pickMode==='shared')throw Error('限定モードでは共有アカウント認証を使用しません');
     if(!this.cfg.clientId||!this.cfg.clientSecret)return false;
     if(this.authPreparing[pickMode])return this.authPreparing[pickMode];
@@ -361,8 +362,13 @@ class GSyncLimited extends Plugin {
     if(!this.cfg.clientId||!this.cfg.clientSecret)throw Error('OAuthクライアントIDとシークレットを入力してください');
     // Generate missing/expired PKCE authorization before opening the browser.
     // The previous implementation silently required a second tap on iOS.
-    if(!await this.prepareAuth(pickMode))throw Error('OAuth設定が未完了です。詳細設定のClient IDとSecretを確認してください。');
-    const entry=this.preparedAuth[pickMode];
+    // Fast path avoids yielding before window.open, preserving iOS tap activation.
+    let entry=this.preparedAuth[pickMode];
+    const expectedKey=this.cfg.clientId+'|'+this.cfg.redirectUri;
+    if(!entry||entry.key!==expectedKey||Date.now()-entry.pending.time>=12*60000){
+      if(!await this.prepareAuth(pickMode))throw Error('OAuth設定が未完了です。詳細設定のClient IDとSecretを確認してください。');
+      entry=this.preparedAuth[pickMode];
+    }
     if(!entry?.url)throw Error('認証リンクを生成できませんでした。OAuth設定を確認してください。');
     const url=entry.url;
     this.cfg.lastLoginError='';
@@ -389,8 +395,15 @@ class GSyncLimited extends Plugin {
     else new Notice('Google認証画面を開きました。アプリ内表示になる場合はURLコピーも利用できます。',8000);
   }
   async copySignInUrl(pickMode='folder'){
-    if(!await this.prepareAuth(pickMode))throw Error('OAuthの設定を確認してください');
-    await navigator.clipboard.writeText(this.preparedAuth[pickMode].url);
+    if(pickMode==='shared'&&!this.cfg.sharedAccountConfirmed)throw Error('メインとは別のGoogleアカウントを使用する必要があります。');
+    let entry=this.preparedAuth[pickMode];
+    const expectedKey=this.cfg.clientId+'|'+this.cfg.redirectUri;
+    if(!entry||entry.key!==expectedKey||Date.now()-entry.pending.time>=12*60000){
+      if(!await this.prepareAuth(pickMode))throw Error('OAuthの詳細設定を確認してください');
+      entry=this.preparedAuth[pickMode];
+    }
+    if(!navigator.clipboard?.writeText)throw Error('この端末ではコピーが利用できません。ブラウザを開くボタンを使用してください。');
+    await navigator.clipboard.writeText(entry.url);
     new Notice('認証URLをコピーしました。既定ブラウザへ貼り付けてください。',9500);
   }
   async verifyConnection(){
@@ -762,6 +775,7 @@ class LimitedSettings extends PluginSettingTab {
     }
     new Setting(el).setName('接続テスト').setDesc('認証情報と同期先フォルダへのアクセスを検証します。').addButton(b=>b.setButtonText('Google接続を確認').setDisabled(!hasAuth||!!s.needsReauth).onClick(()=>void p.verifyConnection().catch(e=>new Notice('接続失敗: '+e.message,12000))));
     new Setting(el).setName('必須設定 1/4 — Google認証').setHeading();
+    if(!s.clientId||!s.clientSecret)box('OAuth設定が不足しています','Google Cloud OAuthの詳細設定を開き、Client IDとClient Secretを入力してください。', 'warn');
     const authOptions=el.createEl('details');const authSummary=authOptions.createEl('summary',{text:'Google Cloud OAuthの詳細設定（登録済みなら変更不要）'});authOptions.open=!s.clientId||!s.clientSecret;
     const input=(name,key,secret=false)=>new Setting(authOptions).setName(name).addText(t=>{if(secret)t.inputEl.type='password';t.setValue(String(s[key]||'')).onChange(async v=>{s[key]=v.trim();p.preparedAuth={};p.cfg.pendingByMode={};p.invalidate();await p.save();void p.prepareAuth(shared?'shared':'folder').catch(()=>{});});});
     input('OAuth client ID','clientId');input('OAuth client secret','clientSecret',true);input('Sign-in redirect page','redirectUri');
@@ -772,7 +786,8 @@ class LimitedSettings extends PluginSettingTab {
       new Setting(el).setName('別のGoogleアカウントを準備済み').setDesc('メインと異なる、共有を受け取る専用Googleアカウントであることを確認します。').addToggle(t=>t.setValue(!!s.sharedAccountConfirmed).onChange(async v=>{s.sharedAccountConfirmed=v;await p.save();this.display();}));
       new Setting(el).setName('専用アカウントのメールアドレス').setDesc('間違ったGoogleアカウントで認証した場合は拒否します。').addText(t=>t.setPlaceholder('sync@example.com').setValue(s.expectedDedicatedEmail||'').onChange(async v=>{s.expectedDedicatedEmail=v.trim();p.preparedAuth={};p.cfg.pendingByMode={};await p.save();void p.prepareAuth('shared').catch(()=>{});}));
       void p.prepareAuth('shared').catch(e=>console.warn('[gsync-limited] prepare shared',e));
-      new Setting(el).setName(s.needsReauth?'Google認証を更新':'専用アカウントでログイン').setDesc('iPhoneのブラウザで専用アカウントを選択します。').addButton(b=>b.setButtonText(s.needsReauth?'再認証':'Googleログイン').setDisabled(!s.expectedDedicatedEmail||!s.sharedAccountConfirmed||!s.clientId||!s.clientSecret).onClick(()=>void p.requestSignIn('shared').catch(e=>new Notice(e.message,13000))));
+      if(!s.sharedAccountConfirmed)box('このままではログインできません','別アカウントがない場合は「個別ファイル許可方式に戻す」を押してください。メインアカウントにDrive全体の権限を与える方式は推奨しません。','warn');
+      new Setting(el).setName(s.needsReauth?'Google認証を更新':'専用アカウントでログイン').setDesc('別アカウントの準備とOAuth設定が完了するとボタンが有効になります。').addButton(b=>b.setButtonText(s.needsReauth?'再認証':'Googleログイン').setDisabled(!s.expectedDedicatedEmail||!s.sharedAccountConfirmed||!s.clientId||!s.clientSecret).onClick(()=>void p.requestSignIn('shared').catch(e=>new Notice(e.message,13000))));
       new Setting(el).setName('ログインURLをコピー').setDesc('既定ブラウザへ直接貼り付ける場合はこちら。').addButton(b=>b.setButtonText('コピー').setDisabled(!s.sharedAccountConfirmed||!s.clientId||!s.clientSecret).onClick(()=>void p.copySignInUrl('shared').catch(e=>new Notice(e.message,12000))));
       new Setting(el).setName('必須設定 2/4 — 共有フォルダを登録').setHeading();
       el.createEl('p',{text:'メインアカウントから専用アカウントに「編集者」として共有したフォルダを選択します。個別ファイルの許可は不要です。'});
