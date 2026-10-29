@@ -33,6 +33,15 @@ test('Existing local secret takes priority over stale cloud-backed configuration
  const two=instance('A',ss,{localSecretId:one.cfg.localSecretId,refreshToken:'stale-cloud',clientSecret:'stale-cloud'});
  await two.onload();assert.equal(two.cfg.refreshToken,'new-device');assert.equal(two.cfg.clientSecret,'new-secret');assert.equal(two.data.refreshToken,'');
 });
+test('Stale shared-mode refresh token from cloud never revives after SecretStorage setup',async()=>{
+ const ss=store(),id='b'.repeat(32),key='gsync-limited-auth-'+id;
+ ss.map.set(key,JSON.stringify({refreshToken:'local-only',clientSecret:'local',pendingByMode:{},profiles:{}}));
+ const p=instance('A',ss,{localSecretId:id,modeProfiles:{shared:{refreshToken:'stale-cloud-secret'}}});
+ await p.onload();
+ assert.equal(p.cfg.modeProfiles.shared.refreshToken,undefined);
+ assert(!JSON.stringify(ss.map.get(key)).includes('stale-cloud-secret'));
+ assert(!JSON.stringify(p.data).includes('stale-cloud-secret'));
+});
 test('Two different vaults have different SecretStorage keys even on iOS',async()=>{
  const ss=store(),a=instance('A',ss,{refreshToken:'VAULT_A'}),b=instance('B',ss,{refreshToken:'VAULT_B'});
  await a.onload();await b.onload();assert.notEqual(a.localAuthKey,b.localAuthKey);
