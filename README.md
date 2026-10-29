@@ -1,8 +1,16 @@
-# GSync Limited 0.3.0 — shared-folder beta
+# GSync Limited 0.3.1 — OAuth login UX hotfix (beta)
 
 非公式のObsidian同期プラグインです。元の[GSync](https://github.com/dg0988/ObsidianGSync)（MITライセンス）をもとにした実験的な改修版です。
 
 **現在の版はベータ版です。実際のiPhone・Google OAuth・共有Driveフォルダでのエンドツーエンド試験はまだ完了していません。初回同期は必ずバックアップ済みのテスト用Vaultで行ってください。**
+
+## 「Googleログイン」が押せない場合（0.3.1）
+
+- 共有フォルダ方式では、**メインアカウントとは別のGoogleアカウントが必須**です。別アカウントを準備した場合のみ「別のGoogleアカウントを準備済み」をONにするとログインボタンが有効になります。
+- **メインアカウントしかない場合は「個別ファイル許可方式に戻す」を押してください。** この旧方式ではGoogle Drive内の全ファイルを自動的に同期できません。
+- OAuthの詳細設定にClient IDとClient Secretの入力がない場合は、先に設定してください。
+- URLの生成前にボタンを押したときの2度押し問題を修正しました。アプリ内でブラウザが開かない場合は「ログインURLをコピー」を使い、Safari/Chromeに貼り付けてください。
+- **Google高度な保護下で広域Drive権限を許可できるという保証はありません。** その制限を解除する改修ではありません。
 
 ## 推奨構成：専用Googleアカウント＋共有フォルダ
 
@@ -16,7 +24,7 @@
 
 1. メインGoogleアカウントのDriveで同期元フォルダを開き、専用Googleアカウントを**編集者**として共有します。
 2. Google CloudのOAuth同意画面が「テスト中」の場合、**専用Googleアカウントをテストユーザーに追加**します。OAuthクライアントは既存のWebアプリ用のものを使えます。承認済みリダイレクトURIは `https://daffy11.github.io/gsync-oauth-callback/limited-callback.html` です。
-3. iPhoneのObsidianでBRATを使い、このリポジトリ `daffy11/gsync-oauth-callback` を導入・更新します。プラグインの表示版数は `0.3.0` です。
+3. iPhoneのObsidianでBRATを使い、このリポジトリ `daffy11/gsync-oauth-callback` を導入・更新します。プラグインの表示版数は `0.3.1` です。
 4. GSync Limited設定で、**同期方式 → 専用Googleアカウント＋共有フォルダ**を選択します。**専用アカウントのメールアドレス**を入力し、「専用アカウントでログイン」を実行します。
 5. メインアカウントで共有したフォルダのURL（例：`https://drive.google.com/drive/folders/<フォルダID>`）を「共有フォルダのURLまたはID」に入力して登録します。または「共有フォルダを探す」を使用します。
 6. **読取テスト**でフォルダ配下が取得できるか確認します。初回は**Google Drive優先**、iPhoneだけにあるファイルは**保持**が初期値です。
@@ -44,7 +52,7 @@ Google CloudのOAuthアプリが「外部 / テスト中」の場合、Drive API
 ## ソース / インストール
 
 - リポジトリ: https://github.com/daffy11/gsync-oauth-callback
-- BRAT用Release: https://github.com/daffy11/gsync-oauth-callback/releases/tag/0.3.0
+- BRAT用Release: https://github.com/daffy11/gsync-oauth-callback/releases/tag/0.3.1
 - Google認証コールバック: https://daffy11.github.io/gsync-oauth-callback/limited-callback.html
 
 **認証用シークレット、アクセストークン、リフレッシュトークン、プライベートなVaultの中身をGitHubへコミットしないでください。**
