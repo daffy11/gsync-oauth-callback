@@ -1,4 +1,4 @@
-name: Validate and publish GSync Limited 0.3.1
+name: Validate and publish GSync Limited 0.3.2
 on:
   pull_request:
     branches: [main]
@@ -22,15 +22,16 @@ jobs:
           node scripts/release-smoke.cjs
           node scripts/shared-mode-tests.cjs
           node scripts/login-ux-tests.cjs
-          node -e "let m=require('./manifest.json');if(m.id!=='gsync-limited'||m.version!=='0.3.1'||m.isDesktopOnly)process.exit(1)"
+          node scripts/secret-storage-tests.cjs
+          node -e "let m=require('./manifest.json');if(m.id!=='gsync-limited'||m.version!=='0.3.2'||m.isDesktopOnly)process.exit(1)"
           sha256sum main.js manifest.json
       - name: Publish BRAT release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view 0.3.1 >/dev/null 2>&1; then
-            gh release upload 0.3.1 main.js manifest.json --clobber
+          if gh release view 0.3.2 >/dev/null 2>&1; then
+            gh release upload 0.3.2 main.js manifest.json --clobber
           else
-            gh release create 0.3.1 main.js manifest.json --title 'GSync Limited 0.3.1 (shared-folder beta)' --notes 'BETA: fixed first-tap login, separate-account confirmation and fallback to drive.file; dedicated account + shared folder full Drive scope; token-expiry reauthentication prompts; per-folder sync preview and conflict backups. Never authenticate with your personal main account: full Drive permission is requested. Google OAuth and iPhone live integration are not verified by CI. Back up and use a disposable vault for the first sync.' --prerelease --target main
+            gh release create 0.3.2 main.js manifest.json --title 'GSync Limited 0.3.2 (shared-folder beta)' --notes 'BETA: fixed first-tap login, separate-account confirmation and fallback to drive.file; dedicated account + shared folder full Drive scope; token-expiry reauthentication prompts; per-folder sync preview and conflict backups. Never authenticate with your personal main account: full Drive permission is requested. Google OAuth and iPhone live integration are not verified by CI. Back up and use a disposable vault for the first sync.' --prerelease --target main
           fi

@@ -1,9 +1,9 @@
 {
   "id": "gsync-limited",
   "name": "GSync Limited",
-  "version": "0.3.1",
-  "minAppVersion": "1.6.6",
-  "description": "Fix mobile OAuth login flow, clarify separate Google account requirement, and keep limited drive.file mode available.",
+  "version": "0.3.2",
+  "minAppVersion": "1.11.4",
+  "description": "Security update: device-local SecretStorage migration for OAuth tokens; conservative drive.file single-account mode.",
   "author": "Community adaptation of GSync (unofficial)",
   "isDesktopOnly": false
 }

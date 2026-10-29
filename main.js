@@ -252,6 +252,44 @@ class GSyncLimited extends Plugin {
   async onload(){
     const saved=await this.loadData()||{};
     this.cfg={...DEFAULTS,...saved,rules:{...(saved.rules||{})},state:saved.state||{},selectedFiles:saved.selectedFiles||{},protectedLocal:saved.protectedLocal||[],pendingByMode:saved.pendingByMode||{}};
+    // Since v0.3.2 OAuth credentials and transient PKCE state never belong inside the Vault.
+    // Require Obsidian 1.11.4+ SecretStorage (local to the device, not guaranteed encrypted at rest).
+    const store=this.app.secretStorage;
+    if(!store||typeof store.getSecret!=='function'||typeof store.setSecret!=='function')
+      throw Error('GSync Limited requires Obsidian 1.11.4+ SecretStorage to keep OAuth credentials out of the synced Vault.');
+    // Random, vault-specific storage ID avoids mobile SecretStorage name collisions.
+    // This identifier is public and is intentionally kept in the Vault config.
+    if(!/^[a-f0-9]{32}$/.test(this.cfg.localSecretId||'')){
+      const bytes=crypto.getRandomValues(new Uint8Array(16));
+      this.cfg.localSecretId=Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');
+    }
+    this.localAuthKey='gsync-limited-auth-'+this.cfg.localSecretId;
+    const raw=store.getSecret(this.localAuthKey);
+    let local=null;
+    if(raw){
+      try{local=JSON.parse(raw)}catch(e){throw Error('Local OAuth secret record is damaged; refusing to overwrite it. '+e.message)}
+      if(!local||typeof local!=='object')throw Error('Invalid local OAuth secret format');
+      // Device-local credentials win over stale copies found in a synced data.json.
+      this.cfg.refreshToken=local.refreshToken||'';
+      this.cfg.clientSecret=local.clientSecret||'';
+      this.cfg.pendingByMode=local.pendingByMode||{};
+      this.cfg.pending=local.pending||null;
+      // Never restore stale profile credentials from a Drive-synced copy once a
+      // valid device-local SecretStorage record exists.
+      this.cfg.modeProfiles=this.cfg.modeProfiles||{};
+      for(const profile of Object.values(this.cfg.modeProfiles||{})){
+        if(profile&&typeof profile==='object'){
+          delete profile.refreshToken;delete profile.clientSecret;
+          delete profile.pendingByMode;delete profile.pending;
+        }
+      }
+      for(const [mode,auth] of Object.entries(local.profiles||{})){
+        this.cfg.modeProfiles=this.cfg.modeProfiles||{};
+        this.cfg.modeProfiles[mode]={...(this.cfg.modeProfiles[mode]||{}),refreshToken:auth.refreshToken||''};
+      }
+    }
+    // On first upgrade, saveData below migrates any legacy credentials out of data.json.
+    await this.save();
     this.liveAccessToken='';this.accessExpiry=0;this.busy=false;this.previewed=null;this.lastSync=0;
     this.drive=new DriveIO(()=>this.getAccess(),requestUrl);this.preparedAuth={};this.authPreparing={};
     this.tab=new LimitedSettings(this.app,this);this.addSettingTab(this.tab);
@@ -267,7 +305,27 @@ class GSyncLimited extends Plugin {
     this.app.workspace.onLayoutReady(()=>window.setTimeout(()=>void this.checkAuthHealth(),2200));
     this.registerInterval(window.setInterval(()=>void this.checkAuthHealth(),6*60*60*1000));
   }
-  async save(){await this.saveData(this.cfg);}
+  async save(){
+    const store=this.app.secretStorage;
+    if(!store||typeof store.setSecret!=='function')
+      throw Error('SecretStorage unavailable. Refusing to save OAuth secrets inside Vault.');
+    const profiles=this.cfg.modeProfiles||{};
+    const auth={
+      refreshToken:this.cfg.refreshToken||'',
+      clientSecret:this.cfg.clientSecret||'',
+      pendingByMode:this.cfg.pendingByMode||{},
+      pending:this.cfg.pending||null,
+      profiles:Object.fromEntries(Object.entries(profiles).map(([mode,p])=>[mode,{refreshToken:p?.refreshToken||''}]))
+    };
+    // Write local credentials FIRST. Never downgrade to plaintext on storage failure.
+    if(!/^gsync-limited-auth-[a-f0-9]{32}$/.test(this.localAuthKey||''))throw Error('Invalid local credential storage key');
+    store.setSecret(this.localAuthKey,JSON.stringify(auth));
+    const publicProfiles=Object.fromEntries(Object.entries(profiles).map(([mode,p])=>{
+      const copy={...p};delete copy.refreshToken;delete copy.clientSecret;delete copy.pendingByMode;delete copy.pending;return [mode,copy];
+    }));
+    const settings={...this.cfg,refreshToken:'',clientSecret:'',pending:null,pendingByMode:{},modeProfiles:publicProfiles};
+    await this.saveData(settings);
+  }
   invalidate(){this.previewed=null;}
   async switchAccessMode(mode){
     if(!['limited','shared'].includes(mode))throw Error('Invalid sync mode');
@@ -751,8 +809,13 @@ class LimitedSettings extends PluginSettingTab {
     const scanned=hasFolder&&s.lastScanAt>0&&s.lastScanRoot===s.rootId;
     const visible=scanned?s.lastVisibleFileCount:null;
     el.createEl('p',{text:'初回同期は自動で実行されません。①アクセス権を確認 → ②同期対象を確認 → ③ルールを選択 → ④差分確認 → ⑤適用、の順に進めます。'});
-    new Setting(el).setName('同期方式').setDesc('新方式は専用Googleアカウントの共有フォルダを使用します。OAuthには専用アカウントのDrive全体への権限が必要です。').addDropdown(d=>d.addOptions({shared:'専用Googleアカウント＋共有フォルダ',limited:'個別ファイル許可（旧方式）'}).setValue(s.accessMode||'limited').onChange(v=>void p.switchAccessMode(v)));
+    new Setting(el).setName('同期方式').setDesc('新方式は専用Googleアカウントの共有フォルダを使用します。OAuthには専用アカウントのDrive全体への権限が必要です。').addDropdown(d=>d.addOptions({limited:'1アカウント：drive.file（ファイル単位）',shared:'2アカウント：共有フォルダ（Drive全体の権限）'}).setValue(s.accessMode||'limited').onChange(v=>void p.switchAccessMode(v)));
     const shared=(s.accessMode||'limited')==='shared';
+    if(!shared){
+      const scopeAlert=el.createEl('p',{text:'安全モード（1アカウント）: drive.fileで許可済みファイルのみ操作します。Drive for desktopのVaultを丸ごと自動同期する方式ではありません。Googleの高度な保護を解除しないでください。'});
+      scopeAlert.style.color='var(--text-warning)';
+    }
+    new Setting(el).setName('認証情報の保管').setDesc('0.3.2以降はOAuthトークン・Client Secret・PKCE情報を端末側のSecretStorageに保存し、Vault内のdata.jsonには保存しません。旧版がDriveに保存した履歴は残る場合があります。');
     new Setting(el).setName('現在のセットアップ状況').setHeading();
     box('① Google認証: '+(s.needsReauth?'更新が必要':hasAuth?'済み':'未完了'),s.needsReauth?'Google認証が失効しました。下の「再認証」を実行してください。':hasAuth?(s.lastAuthCheck?'Google接続確認: '+date(s.lastAuthCheck):'トークンは保存済み。接続テストが必要です。'):'OAuth設定とログインが必要です。',hasAuth&&s.lastAuthCheck&&!s.needsReauth?'ok':'warn');
     if(s.lastAuthError)box('認証の前回エラー',s.lastAuthError,'warn');

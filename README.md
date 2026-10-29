@@ -1,8 +1,27 @@
-# GSync Limited 0.3.1 — OAuth login UX hotfix (beta)
+# GSync Limited 0.3.2 — 認証情報保護アップデート（ベータ）
 
 非公式のObsidian同期プラグインです。元の[GSync](https://github.com/dg0988/ObsidianGSync)（MITライセンス）をもとにした実験的な改修版です。
 
 **現在の版はベータ版です。実際のiPhone・Google OAuth・共有Driveフォルダでのエンドツーエンド試験はまだ完了していません。初回同期は必ずバックアップ済みのテスト用Vaultで行ってください。**
+
+## 重要：1アカウント・高度な保護・WindowsのマイドライブVault
+
+この環境での**推奨設定は「1アカウント：drive.file（ファイル単位）」**です。広域の `drive` 権限を要求しません。Windows側でGoogle Drive for desktopのマイドライブ内にあるVaultをObsidianで直接開くことは、今までどおり継続できます。
+
+ただし、**このプラグインがiPhoneからWindowsの既存Vaultフォルダ全体を自動同期できるという意味ではありません**。Googleの `drive.file` 権限では、ユーザーが個別に許可していない既存ファイル・別アプリが追加したファイルへのアクセスは付与されません。Google Pickerでフォルダを選んでも、その子ファイル全体への権限にはなりません。AppleのiOS版ObsidianはGoogle Driveのファイル提供領域をそのままVaultとして開くこともサポートしていません。
+
+Googleの高度な保護を維持した単一アカウントで、Drive for desktopの既存VaultをiPhoneが直接完全同期するという要件は、現在のGoogle OAuth/Obsidian iOSの公開APIでは**実現できていません**。この制約を回避する「隠し権限」の実装はしていません。
+
+## 0.3.2：認証情報を端末側へ移動
+
+旧版はOAuth refresh token・Client Secret・PKCEをVaultの `.obsidian/plugins/gsync-limited/data.json` に平文で保存するため、マイドライブのVaultを使う環境でDriveへ同期され得ました。
+
+- 0.3.2以降はObsidian **SecretStorage** に保存し、`data.json` には秘密情報を残さない設計です。Obsidian 1.11.4以降が必要です。
+- 移行時に旧設定から秘密情報を読み取り、SecretStorageに書き込んだ後で、設定ファイルをサニタイズします。
+- SecretStorageが使えない・読み取れない場合は同期を停止し、平文へのフォールバックはしません。
+- SecretStorageは端末ローカルの保管領域です。別端末では認証をやり直す必要があります。保存内容が常に端末上で暗号化されるとまでは保証できません。
+- **既にGoogle Driveへ同期された過去の `data.json` の版履歴・バックアップを消す機能ではありません。** 機密性を重視するならGoogleアカウントのサードパーティ連携で古いOAuth認証の取り消しと再認証を検討してください。
+- この更新で**Vaultのノート本文がエンドツーエンド暗号化されるわけではありません**。
 
 ## 「Googleログイン」が押せない場合（0.3.1）
 
@@ -24,7 +43,7 @@
 
 1. メインGoogleアカウントのDriveで同期元フォルダを開き、専用Googleアカウントを**編集者**として共有します。
 2. Google CloudのOAuth同意画面が「テスト中」の場合、**専用Googleアカウントをテストユーザーに追加**します。OAuthクライアントは既存のWebアプリ用のものを使えます。承認済みリダイレクトURIは `https://daffy11.github.io/gsync-oauth-callback/limited-callback.html` です。
-3. iPhoneのObsidianでBRATを使い、このリポジトリ `daffy11/gsync-oauth-callback` を導入・更新します。プラグインの表示版数は `0.3.1` です。
+3. iPhoneのObsidianでBRATを使い、このリポジトリ `daffy11/gsync-oauth-callback` を導入・更新します。プラグインの表示版数は `0.3.2` です。
 4. GSync Limited設定で、**同期方式 → 専用Googleアカウント＋共有フォルダ**を選択します。**専用アカウントのメールアドレス**を入力し、「専用アカウントでログイン」を実行します。
 5. メインアカウントで共有したフォルダのURL（例：`https://drive.google.com/drive/folders/<フォルダID>`）を「共有フォルダのURLまたはID」に入力して登録します。または「共有フォルダを探す」を使用します。
 6. **読取テスト**でフォルダ配下が取得できるか確認します。初回は**Google Drive優先**、iPhoneだけにあるファイルは**保持**が初期値です。
@@ -52,7 +71,7 @@ Google CloudのOAuthアプリが「外部 / テスト中」の場合、Drive API
 ## ソース / インストール
 
 - リポジトリ: https://github.com/daffy11/gsync-oauth-callback
-- BRAT用Release: https://github.com/daffy11/gsync-oauth-callback/releases/tag/0.3.1
+- BRAT用Release: https://github.com/daffy11/gsync-oauth-callback/releases/tag/0.3.2
 - Google認証コールバック: https://daffy11.github.io/gsync-oauth-callback/limited-callback.html
 
 **認証用シークレット、アクセストークン、リフレッシュトークン、プライベートなVaultの中身をGitHubへコミットしないでください。**
