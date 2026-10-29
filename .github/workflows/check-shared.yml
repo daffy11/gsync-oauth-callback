@@ -1,10 +1,8 @@
-name: Check shared-folder prototype
+name: Shared-folder regression and bug-hunt
 on:
   push:
-    branches: [main]
-    paths:
-      - scripts/shared-folder-mode.py
-      - .github/workflows/check-shared.yml
+    branches: ['fix/shared-folder-auth-0.3']
+    paths: ['main.js','scripts/shared-mode-tests.cjs','.github/workflows/check-shared.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -13,6 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 scripts/shared-folder-mode.py
-      - run: node --check main.js
-      - run: node scripts/release-smoke.cjs
+      - name: Syntax
+        run: node --check main.js
+      - name: Existing sync safety regressions
+        run: node scripts/release-smoke.cjs
+      - name: Shared-folder and OAuth expiry regressions
+        run: node scripts/shared-mode-tests.cjs

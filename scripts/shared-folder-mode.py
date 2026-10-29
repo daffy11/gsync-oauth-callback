@@ -201,10 +201,10 @@ s=s[:start]+"""  async getAccess(){
 """ +s[end:]
 rep("  async createOwnRoot(){",
 "  async createOwnRoot(){\n    if(this.cfg.accessMode==='shared')throw Error('共有フォルダモードでは既存の共有フォルダを指定してください');")
-rep("const tree=await this.drive.tree(this.cfg.rootId,this.cfg.selectedFiles);",
-"const tree=await this.drive.tree(this.cfg.rootId,this.cfg.accessMode==='shared'?{}:this.cfg.selectedFiles);") # Only first occurrence in scanRemote; second next
-rep("const tree=await this.drive.tree(this.cfg.rootId,this.cfg.selectedFiles);",
-"const tree=await this.drive.tree(this.cfg.rootId,this.cfg.accessMode==='shared'?{}:this.cfg.selectedFiles);")
+old="const tree=await this.drive.tree(this.cfg.rootId,this.cfg.selectedFiles);"
+new="const tree=await this.drive.tree(this.cfg.rootId,this.cfg.accessMode==='shared'?{}:this.cfg.selectedFiles);"
+if s.count(old)!=2: raise RuntimeError("Expected two inventory sites")
+s=s.replace(old,new)
 rep("    if(task.remote){\n      const r=await this.drive.get(task.remoteId);",
 """    if(task.remote){
       if(this.cfg.accessMode==='shared'&&!(await this.drive.isInsideRoot(task.remoteId,this.cfg.rootId)))
