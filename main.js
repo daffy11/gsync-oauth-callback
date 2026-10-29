@@ -238,7 +238,7 @@ const DEFAULTS={
   // The drive.file scope never guarantees folder-complete visibility. Keep writes off until explicit opt-in.
   allowRemoteWrites:false,
   lastAuthCheck:0,lastAuthError:'',lastSyncAt:0,lastSyncResult:'',lastSyncError:'',pendingByMode:{},lastScanAt:0,lastScanRoot:'',lastVisibleFileCount:null,lastVisibleFolderCount:null,lastScanError:'',
-  accessMode:'limited',modeProfiles:{},expectedDedicatedEmail:'',connectedAccountEmail:'',testingMode:true,authGrantedAt:0,needsReauth:false,reauthReason:'',lastExpiryAlertAt:0
+  accessMode:'limited',modeProfiles:{},expectedDedicatedEmail:'',connectedAccountEmail:'',testingMode:true,authGrantedAt:0,needsReauth:false,reauthReason:'',lastExpiryAlertAt:0,sharedAccountConfirmed:false,lastLoginError:''
 };
 const randomId = () => b64(crypto.getRandomValues(new Uint8Array(9)));
 const sha256 = async data => b64(new Uint8Array(await crypto.subtle.digest('SHA-256',data)));
@@ -273,7 +273,7 @@ class GSyncLimited extends Plugin {
     if(!['limited','shared'].includes(mode))throw Error('Invalid sync mode');
     const from=this.cfg.accessMode||'limited';
     if(mode===from)return;
-    const fields=['refreshToken','rootId','rootName','ownRoot','selectedFiles','initializedRoot','state','protectedLocal','allowRemoteWrites','lastScanAt','lastScanRoot','lastVisibleFileCount','lastVisibleFolderCount','lastSyncAt','lastSyncResult','lastSyncError','expectedDedicatedEmail','connectedAccountEmail','authGrantedAt','needsReauth','reauthReason','lastAuthCheck','lastAuthError','lastExpiryAlertAt'];
+    const fields=['refreshToken','rootId','rootName','ownRoot','selectedFiles','initializedRoot','state','protectedLocal','allowRemoteWrites','lastScanAt','lastScanRoot','lastVisibleFileCount','lastVisibleFolderCount','lastSyncAt','lastSyncResult','lastSyncError','expectedDedicatedEmail','connectedAccountEmail','authGrantedAt','needsReauth','reauthReason','lastAuthCheck','lastAuthError','lastExpiryAlertAt','sharedAccountConfirmed','lastLoginError'];
     this.cfg.modeProfiles=this.cfg.modeProfiles||{};
     this.cfg.modeProfiles[from]=Object.fromEntries(fields.map(k=>[k,this.cfg[k]]));
     const target=this.cfg.modeProfiles[mode]||{};
@@ -357,27 +357,35 @@ class GSyncLimited extends Plugin {
   async requestSignIn(pickMode='folder'){
     if(pickMode==='files'&&!this.cfg.rootId)throw Error('先にフォルダを選択してください');
     if(pickMode==='shared'&&!this.cfg.expectedDedicatedEmail)throw Error('同期専用Googleアカウントのメールアドレスを先に設定してください');
+    if(pickMode==='shared'&&!this.cfg.sharedAccountConfirmed)throw Error('共有フォルダ方式には別のGoogleアカウントが必要です。「別アカウントを準備済み」を確認するか、個別ファイル許可方式に戻してください。');
     if(!this.cfg.clientId||!this.cfg.clientSecret)throw Error('OAuthクライアントIDとシークレットを入力してください');
-    const entry=this.preparedAuth[pickMode],key=this.cfg.clientId+'|'+this.cfg.redirectUri;
-    if(!entry||entry.key!==key||Date.now()-entry.pending.time>=12*60000){
-      void this.prepareAuth(pickMode);
-      throw Error('認証リンクを準備中です。少し経ってからもう一度押してください。');
-    }
-    // Launch during the tap, not after an async request/blank in-app tab.
-    // The saved PKCE verifier must not be regenerated during the browser trip.
+    // Generate missing/expired PKCE authorization before opening the browser.
+    // The previous implementation silently required a second tap on iOS.
+    if(!await this.prepareAuth(pickMode))throw Error('OAuth設定が未完了です。詳細設定のClient IDとSecretを確認してください。');
+    const entry=this.preparedAuth[pickMode];
+    if(!entry?.url)throw Error('認証リンクを生成できませんでした。OAuth設定を確認してください。');
     const url=entry.url;
+    this.cfg.lastLoginError='';
     const external=globalThis.Capacitor?.Plugins?.InAppBrowser;
     if(typeof external?.openInExternalBrowser==='function'){
       try{
         const promise=external.openInExternalBrowser({url});
-        Promise.resolve(promise).catch(e=>console.warn('[gsync-limited] external browser',e));
+        Promise.resolve(promise).catch(e=>{
+          this.cfg.lastLoginError='外部ブラウザ起動に失敗: '+String(e.message||e);
+          new Notice(this.cfg.lastLoginError+'。下の「ログインURLをコピー」を使用してください。',15000);
+          void this.save();this.tab.display();
+        });
         new Notice('外部ブラウザでGoogle認証を続けてください。',7000);
         return;
       }catch(e){console.warn('[gsync-limited] native browser',e);}
     }
     let opened;
     try{opened=window.open(url,'_system');}catch(e){console.warn('[gsync-limited] system open',e);}
-    if(!opened)new Notice('ブラウザを開けなかった場合は「認証URLをコピー」を使ってください。',10000);
+    if(!opened){
+      this.cfg.lastLoginError='iOSが外部ブラウザ起動を確認できませんでした。';
+      new Notice('ブラウザが開かない場合は「ログインURLをコピー」でChrome/Safariに貼り付けてください。',13000);
+      void this.save();this.tab.display();
+    }
     else new Notice('Google認証画面を開きました。アプリ内表示になる場合はURLコピーも利用できます。',8000);
   }
   async copySignInUrl(pickMode='folder'){
@@ -735,6 +743,7 @@ class LimitedSettings extends PluginSettingTab {
     new Setting(el).setName('現在のセットアップ状況').setHeading();
     box('① Google認証: '+(s.needsReauth?'更新が必要':hasAuth?'済み':'未完了'),s.needsReauth?'Google認証が失効しました。下の「再認証」を実行してください。':hasAuth?(s.lastAuthCheck?'Google接続確認: '+date(s.lastAuthCheck):'トークンは保存済み。接続テストが必要です。'):'OAuth設定とログインが必要です。',hasAuth&&s.lastAuthCheck&&!s.needsReauth?'ok':'warn');
     if(s.lastAuthError)box('認証の前回エラー',s.lastAuthError,'warn');
+    if(s.lastLoginError)box('ブラウザ起動の前回エラー',s.lastLoginError,'warn');
     box('② 同期先フォルダ: '+(hasFolder?'選択済み':'未選択'),hasFolder?s.rootName+'（'+(shared?'専用アカウントへの共有フォルダ':s.ownRoot?'プラグイン専用':'既存のDriveフォルダ')+'）':'Google Driveからフォルダを選択してください。',hasFolder?'ok':'warn');
     if(shared)box('③ 共有フォルダの内容',hasFolder?(scanned?'取得済み: '+visible+'件（'+date(s.lastScanAt)+'）':'一覧をまだ取得していません'):'共有フォルダを指定してください',hasFolder&&scanned?'ok':'warn');
     else box('③ ファイルへの個別許可: '+grantCount+'件',hasFolder?(scanned?'APIから見えたファイル: '+visible+'件（'+date(s.lastScanAt)+'）。':'フォルダ内一覧は未確認です。')+' 0件はDriveのファイル総数ではありません。':'フォルダ選択後に確認できます。',grantCount>0||s.ownRoot?'ok':'warn');
@@ -752,15 +761,19 @@ class LimitedSettings extends PluginSettingTab {
       box('認証の更新',s.needsReauth?'認証が失効しました。再ログインしてください':s.testingMode?'OAuthがテスト状態なら通常7日間で更新が必要です。失効時に通知します。':'認証失効を検出した場合に再ログインを案内します。',s.needsReauth?'warn':'info');
     }
     new Setting(el).setName('接続テスト').setDesc('認証情報と同期先フォルダへのアクセスを検証します。').addButton(b=>b.setButtonText('Google接続を確認').setDisabled(!hasAuth||!!s.needsReauth).onClick(()=>void p.verifyConnection().catch(e=>new Notice('接続失敗: '+e.message,12000))));
-    new Setting(el).setName('必須設定 1/4 — Google認証と同期先フォルダ').setHeading();
+    new Setting(el).setName('必須設定 1/4 — Google認証').setHeading();
     const authOptions=el.createEl('details');const authSummary=authOptions.createEl('summary',{text:'Google Cloud OAuthの詳細設定（登録済みなら変更不要）'});authOptions.open=!s.clientId||!s.clientSecret;
     const input=(name,key,secret=false)=>new Setting(authOptions).setName(name).addText(t=>{if(secret)t.inputEl.type='password';t.setValue(String(s[key]||'')).onChange(async v=>{s[key]=v.trim();p.preparedAuth={};p.cfg.pendingByMode={};p.invalidate();await p.save();void p.prepareAuth(shared?'shared':'folder').catch(()=>{});});});
     input('OAuth client ID','clientId');input('OAuth client secret','clientSecret',true);input('Sign-in redirect page','redirectUri');
     if(shared){
+      const note=el.createEl('p',{text:'この方式には、メインとは別のGoogleアカウントが必要です。メインしかない場合は下の「個別ファイル許可方式に戻す」を使ってください。Google高度な保護のメインアカウントにDrive全体の権限を与えないでください。'});
+      note.style.color='var(--text-warning)';
+      new Setting(el).setName('別アカウントがない場合').setDesc('以前のGoogle認証・フォルダ選択状態を復元します。フォルダ全体の完全自動同期には対応しません。').addButton(b=>b.setButtonText('個別ファイル許可方式に戻す').onClick(()=>void p.switchAccessMode('limited')));
+      new Setting(el).setName('別のGoogleアカウントを準備済み').setDesc('メインと異なる、共有を受け取る専用Googleアカウントであることを確認します。').addToggle(t=>t.setValue(!!s.sharedAccountConfirmed).onChange(async v=>{s.sharedAccountConfirmed=v;await p.save();this.display();}));
       new Setting(el).setName('専用アカウントのメールアドレス').setDesc('間違ったGoogleアカウントで認証した場合は拒否します。').addText(t=>t.setPlaceholder('sync@example.com').setValue(s.expectedDedicatedEmail||'').onChange(async v=>{s.expectedDedicatedEmail=v.trim();p.preparedAuth={};p.cfg.pendingByMode={};await p.save();void p.prepareAuth('shared').catch(()=>{});}));
       void p.prepareAuth('shared').catch(e=>console.warn('[gsync-limited] prepare shared',e));
-      new Setting(el).setName(s.needsReauth?'Google認証を更新':'専用アカウントでログイン').setDesc('iPhoneのブラウザで専用アカウントを選択します。').addButton(b=>b.setButtonText(s.needsReauth?'再認証':'Googleログイン').setDisabled(!s.expectedDedicatedEmail).onClick(()=>void p.requestSignIn('shared').catch(e=>new Notice(e.message,13000))));
-      new Setting(el).setName('ログインURLをコピー').setDesc('既定ブラウザへ直接貼り付ける場合はこちら。').addButton(b=>b.setButtonText('コピー').onClick(()=>void p.copySignInUrl('shared').catch(e=>new Notice(e.message,12000))));
+      new Setting(el).setName(s.needsReauth?'Google認証を更新':'専用アカウントでログイン').setDesc('iPhoneのブラウザで専用アカウントを選択します。').addButton(b=>b.setButtonText(s.needsReauth?'再認証':'Googleログイン').setDisabled(!s.expectedDedicatedEmail||!s.sharedAccountConfirmed||!s.clientId||!s.clientSecret).onClick(()=>void p.requestSignIn('shared').catch(e=>new Notice(e.message,13000))));
+      new Setting(el).setName('ログインURLをコピー').setDesc('既定ブラウザへ直接貼り付ける場合はこちら。').addButton(b=>b.setButtonText('コピー').setDisabled(!s.sharedAccountConfirmed||!s.clientId||!s.clientSecret).onClick(()=>void p.copySignInUrl('shared').catch(e=>new Notice(e.message,12000))));
       new Setting(el).setName('必須設定 2/4 — 共有フォルダを登録').setHeading();
       el.createEl('p',{text:'メインアカウントから専用アカウントに「編集者」として共有したフォルダを選択します。個別ファイルの許可は不要です。'});
       new Setting(el).setName('共有フォルダのURLまたはID').setDesc('メインアカウントのGoogle Driveでフォルダを開いたURLを入力。').addText(t=>t.setPlaceholder('https://drive.google.com/drive/folders/...').onChange(v=>{p.sharedFolderDraft=v.trim();})).addButton(b=>b.setButtonText('このフォルダを使う').setDisabled(!hasAuth||!!s.needsReauth).onClick(()=>void p.selectSharedRoot(p.sharedFolderDraft||'').catch(e=>new Notice(e.message,14000))));
