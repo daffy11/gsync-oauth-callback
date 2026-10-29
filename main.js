@@ -737,16 +737,32 @@ class LimitedSettings extends PluginSettingTab {
     new Setting(el).setName('接続テスト').setDesc('認証情報と同期先フォルダへのアクセスを検証します。').addButton(b=>b.setButtonText('Google接続を確認').setDisabled(!hasAuth||!!s.needsReauth).onClick(()=>void p.verifyConnection().catch(e=>new Notice('接続失敗: '+e.message,12000))));
     new Setting(el).setName('必須設定 1/4 — Google認証と同期先フォルダ').setHeading();
     const authOptions=el.createEl('details');const authSummary=authOptions.createEl('summary',{text:'Google Cloud OAuthの詳細設定（登録済みなら変更不要）'});authOptions.open=!s.clientId||!s.clientSecret;
-    const input=(name,key,secret=false)=>new Setting(authOptions).setName(name).addText(t=>{if(secret)t.inputEl.type='password';t.setValue(String(s[key]||'')).onChange(async v=>{s[key]=v.trim();p.preparedAuth={};p.cfg.pendingByMode={};p.invalidate();await p.save();void p.prepareAuth('folder').catch(e=>console.warn('[gsync-limited] prepare',e));});});
+    const input=(name,key,secret=false)=>new Setting(authOptions).setName(name).addText(t=>{if(secret)t.inputEl.type='password';t.setValue(String(s[key]||'')).onChange(async v=>{s[key]=v.trim();p.preparedAuth={};p.cfg.pendingByMode={};p.invalidate();await p.save();void p.prepareAuth(shared?'shared':'folder').catch(()=>{});});});
     input('OAuth client ID','clientId');input('OAuth client secret','clientSecret',true);input('Sign-in redirect page','redirectUri');
-    void p.prepareAuth('folder').catch(e=>console.warn('[gsync-limited] prepare',e));
-    if(hasFolder)void p.prepareAuth('files').catch(e=>console.warn('[gsync-limited] prepare files',e));
-    new Setting(el).setName('同期先フォルダを選択').setDesc('フォルダを1つ選択します。可能であれば既定ブラウザを使用します。').addButton(b=>b.setButtonText('フォルダを選ぶ').onClick(()=>void p.requestSignIn('folder').catch(e=>new Notice(e.message,10000))));
-    new Setting(el).setName('ブラウザで認証できない場合').setDesc('URLをコピーし、既定のブラウザで開けます。').addButton(b=>b.setButtonText('認証URLをコピー').onClick(()=>void p.copySignInUrl('folder').catch(e=>new Notice(e.message,10000))));
-    new Setting(el).setName('必須設定 2/4 — 既存ファイルを個別に許可').setHeading();
-    new Setting(el).setName('見えるファイル数を調べる（変更なし）').setDesc('許可された範囲でDriveを調査します。ファイル数が0件でも、フォルダが空という証明にはなりません。').addButton(b=>b.setButtonText('ファイル一覧を読み取る').setDisabled(!hasFolder||!hasAuth).onClick(()=>void p.scanRemoteReadOnly().catch(e=>new Notice('読取テスト失敗: '+e.message,15000))));
-    new Setting(el).setName('既存ファイルにアクセスを許可').setDesc('「フォルダ」ではなく中身のファイルを選択します。外部アプリが後から追加したファイルは別途許可が必要です。').addButton(b=>b.setButtonText('ファイルを追加許可').setDisabled(!hasFolder).onClick(()=>void p.requestSignIn('files').catch(e=>new Notice(e.message,10000))));
-    new Setting(el).setName('ファイル許可URLをコピー').addButton(b=>b.setButtonText('コピー').setDisabled(!hasFolder).onClick(()=>void p.copySignInUrl('files').catch(e=>new Notice(e.message,10000))));
+    if(shared){
+      new Setting(el).setName('専用アカウントのメールアドレス').setDesc('間違ったGoogleアカウントで認証した場合は拒否します。').addText(t=>t.setPlaceholder('sync@example.com').setValue(s.expectedDedicatedEmail||'').onChange(async v=>{s.expectedDedicatedEmail=v.trim();p.preparedAuth={};p.cfg.pendingByMode={};await p.save();void p.prepareAuth('shared').catch(()=>{});}));
+      void p.prepareAuth('shared').catch(e=>console.warn('[gsync-limited] prepare shared',e));
+      new Setting(el).setName(s.needsReauth?'Google認証を更新':'専用アカウントでログイン').setDesc('iPhoneのブラウザで専用アカウントを選択します。').addButton(b=>b.setButtonText(s.needsReauth?'再認証':'Googleログイン').setDisabled(!s.expectedDedicatedEmail).onClick(()=>void p.requestSignIn('shared').catch(e=>new Notice(e.message,13000))));
+      new Setting(el).setName('ログインURLをコピー').setDesc('既定ブラウザへ直接貼り付ける場合はこちら。').addButton(b=>b.setButtonText('コピー').onClick(()=>void p.copySignInUrl('shared').catch(e=>new Notice(e.message,12000))));
+      new Setting(el).setName('必須設定 2/4 — 共有フォルダを登録').setHeading();
+      el.createEl('p',{text:'メインアカウントから専用アカウントに「編集者」として共有したフォルダを選択します。個別ファイルの許可は不要です。'});
+      new Setting(el).setName('共有フォルダのURLまたはID').setDesc('メインアカウントのGoogle Driveでフォルダを開いたURLを入力。').addText(t=>t.setPlaceholder('https://drive.google.com/drive/folders/...').onChange(v=>{p.sharedFolderDraft=v.trim();})).addButton(b=>b.setButtonText('このフォルダを使う').setDisabled(!hasAuth||!!s.needsReauth).onClick(()=>void p.selectSharedRoot(p.sharedFolderDraft||'').catch(e=>new Notice(e.message,14000))));
+      new Setting(el).setName('共有フォルダを検索').setDesc('専用アカウントに共有されたフォルダを検索します。').addButton(b=>b.setButtonText('共有フォルダを探す').setDisabled(!hasAuth||!!s.needsReauth).onClick(()=>void p.discoverSharedFolders().catch(e=>new Notice(e.message,14000))));
+      if(Array.isArray(p.sharedCandidates))for(const f of p.sharedCandidates.slice(0,60)){
+        new Setting(el).setName(f.name||'名前なし').setDesc(f.id).addButton(b=>b.setButtonText('選択').onClick(()=>void p.selectSharedRoot(f.id).catch(e=>new Notice(e.message,14000))));
+      }
+      new Setting(el).setName('同期前にファイル一覧を検証').setDesc('Drive内の選択フォルダを再帰的に読み取ります。変更や削除は行いません。').addButton(b=>b.setButtonText('読取テスト').setDisabled(!hasFolder||!hasAuth).onClick(()=>void p.scanRemoteReadOnly().catch(e=>new Notice(e.message,14000))));
+      const warning=el.createEl('p',{text:'注意: GoogleのOAuth権限自体は専用アカウント全体に及びます。このアプリは選択フォルダ以外を同期しない設計です。ほかの個人データを専用アカウントに置かないでください。'});
+      warning.style.color='var(--text-warning)';
+    }else{
+      void p.prepareAuth('folder').catch(()=>{});
+      if(hasFolder)void p.prepareAuth('files').catch(()=>{});
+      new Setting(el).setName('同期先フォルダを選択').addButton(b=>b.setButtonText('フォルダを選ぶ').onClick(()=>void p.requestSignIn('folder').catch(e=>new Notice(e.message,10000))));
+      new Setting(el).setName('認証URLをコピー').addButton(b=>b.setButtonText('コピー').onClick(()=>void p.copySignInUrl('folder').catch(e=>new Notice(e.message,10000))));
+      new Setting(el).setName('必須設定 2/4 — 既存ファイルを個別に許可').setHeading();
+      new Setting(el).setName('見えるファイル数を調べる').addButton(b=>b.setButtonText('ファイル一覧を読み取る').setDisabled(!hasFolder||!hasAuth).onClick(()=>void p.scanRemoteReadOnly().catch(e=>new Notice(e.message,15000))));
+      new Setting(el).setName('既存ファイルを個別に許可').addButton(b=>b.setButtonText('ファイルを追加許可').setDisabled(!hasFolder).onClick(()=>void p.requestSignIn('files').catch(e=>new Notice(e.message,10000))));
+    }
 
     new Setting(el).setName('必須設定 3/4 — 初回同期の方針').setHeading();
     el.createEl('p',{text:'初回はDrive優先が初期値です。iPhoneにしかないファイルは残します。初回同期前はDriveへ書き込みません。'});
@@ -754,7 +770,7 @@ class LimitedSettings extends PluginSettingTab {
     new Setting(el).setName('iPhoneにしかないファイル').addDropdown(d=>d.addOptions({keep:'iPhoneに保持（推奨）',upload:'Driveに追加（専用フォルダのみ）'}).setValue(s.localOnly).onChange(async v=>{s.localOnly=v;p.invalidate();await p.save();}));
     new Setting(el).setName('Driveにしかないファイル').addDropdown(d=>d.addOptions({download:'iPhoneへダウンロード',keep:'Driveのみに残す'}).setValue(s.remoteOnly).onChange(async v=>{s.remoteOnly=v;p.invalidate();await p.save();}));
     const advanced=el.createEl('details'); advanced.createEl('summary',{text:'任意設定・高度な設定（通常は変更不要）'});
-    new Setting(advanced).setName('新しい専用Driveフォルダを作成').setDesc('既存フォルダを使う場合は不要。').addButton(b=>b.setButtonText('専用フォルダを作成').setDisabled(!hasAuth||hasFolder).onClick(()=>void p.createOwnRoot().catch(e=>new Notice(e.message,12000))));
+    if(!shared)new Setting(advanced).setName('新しい専用Driveフォルダを作成').setDesc('既存フォルダを使う場合は不要。').addButton(b=>b.setButtonText('専用フォルダを作成').setDisabled(!hasAuth||hasFolder).onClick(()=>void p.createOwnRoot().catch(e=>new Notice(e.message,12000))));
     new Setting(advanced).setName('通常同期での両側編集時').addDropdown(d=>d.addOptions({both:'両方バックアップ・Driveを正本',drive:'Driveを正本（ローカル退避）',local:'iPhone優先（Drive退避）',skip:'変更せず保留'}).setValue(s.conflict).onChange(async v=>{s.conflict=v;p.invalidate();await p.save();}));
     new Setting(advanced).setName('Driveへの書き込みを許可').setDesc('初期値OFF。外部管理ルートではPickerで個別許可した既存ファイルへの手動更新のみ可。新規アップロードは禁止。').addToggle(t=>t.setValue(s.allowRemoteWrites).onChange(async v=>{s.allowRemoteWrites=v;p.invalidate();await p.save();}));
     new Setting(advanced).setName('除外パス（同期しない）').setDesc('1行に1件。フォルダは末尾 /、例: Archives/、ファイル種類 *.tmp').addTextArea(t=>{t.setValue(s.excludes).onChange(async v=>{s.excludes=v;p.invalidate();await p.save();});});
@@ -770,7 +786,7 @@ class LimitedSettings extends PluginSettingTab {
     new Setting(advanced).setName('起動時に自動同期').addToggle(t=>t.setValue(!!s.syncOnStartup).onChange(async v=>{s.syncOnStartup=v;await p.save();}));
     new Setting(advanced).setName('最大ファイルサイズ（MB）').addText(t=>t.setValue(String(s.maxFileSizeMB)).onChange(async v=>{const n=Number.parseInt(v,10);if(Number.isFinite(n)&&n>0){s.maxFileSizeMB=n;p.invalidate();await p.save();}}));
     new Setting(el).setName('必須設定 4/4 — 差分の確認と実行').setHeading();
-    el.createEl('p',{text:'最初に「差分を確認」を押して、変更されるファイルを見てから実行してください。外部管理フォルダでファイル許可0件のまま初回適用することは禁止しています。'});
+    el.createEl('p',{text:'最初に「差分を確認」を押して、変更されるファイルを見てから実行してください。旧方式では、ファイル個別許可0件の初回同期を禁止します。'});
     new Setting(el).setName('同期プレビュー').setDesc('各ファイルの予定操作と件数を表示。実データは変更しません。').addButton(b=>b.setButtonText('差分を確認').setDisabled(!hasAuth||!hasFolder).onClick(()=>void p.preview()));
     new Setting(el).setName('プレビュー済みの計画を適用').setDesc('一度差分を確認し、5分以内に実行してください。外部編集が挟まると中断します。').addButton(b=>b.setButtonText('確認済み計画を実行').setDisabled(!reviewed).onClick(()=>void p.apply()));
     new Setting(el).setName('初回状態').setDesc(s.rootId&&s.initializedRoot===s.rootId?'初期化済み':'未初期化（最初の適用で選択ルールを採用）');
@@ -778,5 +794,5 @@ class LimitedSettings extends PluginSettingTab {
   }
 }
 module.exports=GSyncLimited;
-module.exports.__test={SyncCore,DriveIO,oauthUrl,sha256,DEFAULTS,REDIRECT,SCOPE};
+module.exports.__test={SyncCore,DriveIO,oauthUrl,sha256,DEFAULTS,REDIRECT,SCOPE,SHARED_SCOPE,parseSharedFolderId};
 
