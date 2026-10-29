@@ -1,0 +1,40 @@
+name: Publish GSync Limited experimental prerelease
+on:
+  push:
+    branches: [main]
+    paths:
+      - main.js.xz.b64
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore distributable and verify JavaScript
+        run: |
+          base64 -d main.js.xz.b64 | xz -d > main.js
+          node --check main.js
+          test -s manifest.json
+          grep -q '"id": "gsync-limited"' manifest.json
+      - name: Commit distributable
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add main.js
+          if ! git diff --staged --quiet; then
+            git commit -m 'Build GSync Limited 0.2.0 distributable'
+            git push origin HEAD:main
+          fi
+      - name: Create or update prerelease for BRAT
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view 0.2.0 >/dev/null 2>&1; then
+            gh release upload 0.2.0 main.js manifest.json --clobber
+          else
+            gh release create 0.2.0 main.js manifest.json --title 'GSync Limited 0.2.0 (experimental)' --notes 'Experimental build. Do NOT use on a production Vault before independent iPhone and Google OAuth verification. No deletion operations.' --prerelease --target main
+          fi
