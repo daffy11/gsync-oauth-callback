@@ -87,12 +87,14 @@ const FOLDER='application/vnd.google-apps.folder';
 const REDIRECT='https://daffy11.github.io/gsync-oauth-callback/limited-callback.html';
 const form = v => new URLSearchParams(v).toString();
 const b64 = b => btoa(String.fromCharCode(...b)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-const oauthUrl = async (clientId,redirect,vaultName) => {
+const oauthUrl = async (clientId,redirect,vaultName,pickMode='folder') => {
+  if(pickMode!=='folder' && pickMode!=='files')throw Error('Invalid Picker mode');
   const verifier=b64(crypto.getRandomValues(new Uint8Array(32)));
   const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier)));
   const state=b64(crypto.getRandomValues(new Uint8Array(24)))+'~'+b64(new TextEncoder().encode(vaultName));
-  const args={client_id:clientId,redirect_uri:redirect,response_type:'code',scope:SCOPE,code_challenge:b64(digest),code_challenge_method:'S256',access_type:'offline',prompt:'consent',state,trigger_onepick:'true',allow_multiple:'true',allow_folder_selection:'true'};
-  return {url:AUTH+'?'+form(args),pending:{verifier,state,redirect,time:Date.now()}};
+  const args={client_id:clientId,redirect_uri:redirect,response_type:'code',scope:SCOPE,code_challenge:b64(digest),code_challenge_method:'S256',access_type:'offline',prompt:'consent',state,trigger_onepick:'true',allow_multiple:pickMode==='files'?'true':'false',allow_folder_selection:pickMode==='folder'?'true':'false'};
+  if(pickMode==='folder')args.mimetypes=FOLDER;
+  return {url:AUTH+'?'+form(args),pending:{verifier,state,redirect,time:Date.now(),pickMode}};
 };
 class DriveIO {
   constructor(accessToken,request){this.getAccessToken=accessToken;this.request=request;}
@@ -213,11 +215,12 @@ class GSyncLimited extends Plugin {
   }
   async save(){await this.saveData(this.cfg);}
   invalidate(){this.previewed=null;}
-  async requestSignIn(){
+  async requestSignIn(pickMode='folder'){
+    if(pickMode==='files' && !this.cfg.rootId)throw Error('Select a root folder first.');
     if(!this.cfg.clientId||!this.cfg.clientSecret)throw Error('OAuth client ID / secret required');
     const tab=window.open('about:blank','_blank');
     try{
-      const {url,pending}=await oauthUrl(this.cfg.clientId,this.cfg.redirectUri,this.app.vault.getName());
+      const {url,pending}=await oauthUrl(this.cfg.clientId,this.cfg.redirectUri,this.app.vault.getName(),pickMode);
       this.cfg.pending=pending;await this.save();
       if(tab)tab.location.href=url;
       else {await navigator.clipboard.writeText(url);new Notice('Google sign-in URL copied. Open it in Safari.',8000);}
@@ -232,20 +235,29 @@ class GSyncLimited extends Plugin {
       this.liveAccessToken=result.access_token;this.accessExpiry=Date.now()+(result.expires_in-60)*1000;
       this.cfg.refreshToken=result.refresh_token||this.cfg.refreshToken;
       const picked=String(args.picked_file_ids||'').split(',').filter(Boolean);
-      let imported=0,folders=[];
-      for(const id of picked){
-        const file=await this.drive.get(id);
-        if(file.mimeType===FOLDER){folders.push(file);}
-        else{this.cfg.selectedFiles[id]={name:file.name};imported++;}
-      }
-      if(folders.length===1){
+      const selected=await Promise.all(picked.map(id=>this.drive.get(id)));
+      const folders=selected.filter(file=>file.mimeType===FOLDER);
+      const files=selected.filter(file=>file.mimeType!==FOLDER);
+      const pickMode=p.pickMode||'folder';
+      if(pickMode==='folder'){
+        if(folders.length!==1||files.length)throw Error('Choose exactly one Drive FOLDER, not files.');
         const f=folders[0];
-        if(this.cfg.rootId!==f.id){this.cfg.initializedRoot='';this.cfg.state={};this.cfg.protectedLocal=[];this.cfg.allowRemoteWrites=false;}
+        if(this.cfg.rootId!==f.id){
+          this.cfg.initializedRoot='';this.cfg.state={};this.cfg.protectedLocal=[];
+          this.cfg.allowRemoteWrites=false;this.cfg.selectedFiles={};
+        }
         this.cfg.rootId=f.id;this.cfg.rootName=f.name;
         this.cfg.ownRoot=f.appProperties?.gsyncLimitedRoot==='1';
-      }else if(folders.length>1)throw Error('Select only ONE root folder per sign-in. No folder change applied.');
+        new Notice('Folder selected: '+f.name+'. Its child files are NOT automatically granted. Grant files separately.',16000);
+      }else{
+        if(folders.length)throw Error('Select files only in Add files flow.');
+        for(const file of files){
+          if(file.mimeType.startsWith('application/vnd.google-apps.'))continue;
+          this.cfg.selectedFiles[file.id]={name:file.name};
+        }
+        new Notice('Granted '+files.length+' file(s). Only individually authorized files are guaranteed visible.',12000);
+      }
       this.invalidate();
-      new Notice('Google auth succeeded: '+imported+' individually selected files. '+folders.length+' folder(s). Review visibility before syncing.',10000);
     }catch(e){new Notice('GSync Limited OAuth: '+e.message,16000);console.error('[gsync-limited]',e);}
     finally{this.cfg.pending=null;await this.save();this.tab.display();}
   }
@@ -460,7 +472,8 @@ class LimitedSettings extends PluginSettingTab {
     el.createEl('p',{text:'この版は drive.file のみにアクセスします。外部アプリが追加した新しいファイルは自動検出できない場合があります。同期前に Google Picker で許可して一覧を確認してください。削除同期・無確認の自動書き込みは行いません。'});
     const input=(name,key,secret=false)=>new Setting(el).setName(name).addText(t=>{if(secret)t.inputEl.type='password';t.setValue(String(s[key]||'')).onChange(async v=>{s[key]=v.trim();p.invalidate();await p.save();});});
     input('OAuth client ID','clientId');input('OAuth client secret','clientSecret',true);input('Sign-in redirect page','redirectUri');
-    new Setting(el).setName('Google OnePick — 許可するフォルダ・ファイルを選択').setDesc('選択したファイルを追加許可する際もここから再認証。').addButton(b=>b.setButtonText('Googleで選択').onClick(()=>void p.requestSignIn().catch(e=>new Notice(e.message,10000))));
+    new Setting(el).setName('① 同期先フォルダを選択').setDesc('フォルダのみ表示。1つ選択します。フォルダへの許可は子ファイルへ自動的に広がりません。').addButton(b=>b.setButtonText('フォルダを選ぶ').onClick(()=>void p.requestSignIn('folder').catch(e=>new Notice(e.message,10000))));
+    new Setting(el).setName('② 既存ファイルを個別許可').setDesc('Driveに保存済みのファイルは別途許可してください。外部アプリが今後追加するファイルも自動許可されません。').addButton(b=>b.setButtonText('ファイルを追加許可').setDisabled(!s.rootId).onClick(()=>void p.requestSignIn('files').catch(e=>new Notice(e.message,10000))));
     new Setting(el).setName('認証状態').setDesc(s.refreshToken?'Refresh token saved on this device':'Not authenticated');
     new Setting(el).setName('Driveルート').setDesc((s.rootName||'未設定')+' / '+(s.rootId||'')+' / '+(s.ownRoot?'プラグイン所有':'外部管理（書込禁止）'));
     new Setting(el).setName('新規の専用Driveルートを作成').addButton(b=>b.setButtonText('専用フォルダを作成').onClick(()=>void p.createOwnRoot().catch(e=>new Notice(e.message,12000))));
