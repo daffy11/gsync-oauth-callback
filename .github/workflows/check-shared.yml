@@ -1,10 +1,8 @@
-name: Check shared-folder prototype
+name: Check shared-folder integration
 on:
   push:
-    branches: [main]
-    paths:
-      - scripts/shared-folder-mode.py
-      - .github/workflows/check-shared.yml
+    branches: ['fix/shared-folder-auth-0.3']
+    paths: ['scripts/shared-folder-mode.py','.github/workflows/check-shared.yml']
   workflow_dispatch:
 permissions:
   contents: read
