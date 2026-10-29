@@ -441,6 +441,10 @@ class GSyncLimited extends Plugin {
         }
         this.cfg.connectedAccountEmail=actual;
       }
+      if(p.pickMode==='shared' && !result.refresh_token && (!this.cfg.refreshToken||this.cfg.needsReauth)){
+        this.liveAccessToken='';this.accessExpiry=0;
+        throw Error('Googleから更新用トークンが発行されませんでした。Googleの接続管理で旧アプリ許可を取り消して再認証してください。');
+      }
       this.cfg.refreshToken=result.refresh_token||this.cfg.refreshToken;
       this.cfg.needsReauth=false;this.cfg.reauthReason='';this.cfg.authGrantedAt=Date.now();
       this.cfg.lastAuthCheck=Date.now();this.cfg.lastAuthError='';
@@ -793,6 +797,7 @@ class LimitedSettings extends PluginSettingTab {
     for(const folder of folderList.slice(0,120)){
       new Setting(advanced).setName(folder+'/').addDropdown(d=>d.addOptions({inherit:'基本ルール',drive:'競合時Drive優先',local:'競合時iPhone優先',both:'競合時両方保持',skip:'このフォルダを触らない'}).setValue(s.rules[folder]||'inherit').onChange(async v=>{if(v==='inherit')delete s.rules[folder];else s.rules[folder]=v;p.invalidate();await p.save();}));
     }
+    if(shared)new Setting(advanced).setName('Google OAuthがテスト状態（表示用）').setDesc('Google Cloudの公開状態に合わせて設定してください。このスイッチでGoogleのトークン期限は変わりません。').addToggle(t=>t.setValue(!!s.testingMode).onChange(async v=>{s.testingMode=v;await p.save();this.display();}));
     new Setting(advanced).setName('自動同期（明示的に有効化した場合のみ）').setDesc('初期OFF。Obsidianが開いている間のみ差分を検証・同期。競合は双方退避。').addToggle(t=>t.setValue(!!s.autoEnabled).onChange(async v=>{s.autoEnabled=v;p.invalidate();await p.save();}));
     new Setting(advanced).setName('自動同期の間隔（分）').setDesc('0で無効。デフォルト無効。').addText(t=>t.setValue(String(s.autoMinutes)).onChange(async v=>{const n=Number.parseInt(v,10);s.autoMinutes=Number.isFinite(n)&&n>0?n:0;p.invalidate();await p.save();}));
     new Setting(advanced).setName('自動でDriveへ書き込む').setDesc(shared?'初期OFF。共有フォルダ内の更新に限ります。外部編集との同時操作を完全にはロックできません。':'初期OFF。専用ルート＋書き込み許可が必要です。').addToggle(t=>t.setValue(!!s.autoRemoteWrites).onChange(async v=>{s.autoRemoteWrites=v;p.invalidate();await p.save();}));
