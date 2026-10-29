@@ -95,6 +95,35 @@ const instance=()=>{
   p.app.vault.getAbstractFileByPath=()=>null;
   await assert.rejects(p.assertUnchanged({path:'a.md',local:false,remote:true,remoteId:'somefile',remoteRevision:'1'}),/フォルダ外/);
  });
+ await test('Wrong Google account during code exchange refuses to save refresh token',async()=>{
+  const p=instance();p.cfg.accessMode='shared';p.cfg.clientId='client';p.cfg.clientSecret='secret';
+  p.cfg.expectedDedicatedEmail='sync@example.com';p.cfg.pendingByMode.shared={state:'q',time:Date.now(),pickMode:'shared',redirect:'https://example.org/cb',verifier:'v'};
+  p.drive.about=async()=>({user:{emailAddress:'personal@example.com'}});
+  tokenResponse=async()=>({status:200,json:{access_token:'access',expires_in:3600,refresh_token:'private-token'},text:''});
+  await p.finishAuth({state:'q',code:'mock-code'});
+  assert.equal(p.cfg.refreshToken,'');assert.equal(p.liveAccessToken,'');assert.match(p.cfg.lastAuthError,/一致しません/);
+ });
+ await test('Successful shared OAuth saves new refresh token and account identity',async()=>{
+  const p=instance();p.cfg.accessMode='shared';p.cfg.clientId='client';p.cfg.clientSecret='secret';
+  p.cfg.expectedDedicatedEmail='sync@example.com';p.cfg.pendingByMode.shared={state:'p',time:Date.now(),pickMode:'shared',redirect:'https://example.org/cb',verifier:'v'};
+  tokenResponse=async()=>({status:200,json:{access_token:'access',expires_in:3600,refresh_token:'new-refresh'},text:''});
+  await p.finishAuth({state:'p',code:'mock-code'});
+  assert.equal(p.cfg.refreshToken,'new-refresh');assert.equal(p.cfg.connectedAccountEmail,'sync@example.com');assert.equal(p.cfg.needsReauth,false);
+ });
+ await test('OAuth success without refresh token cannot clear an expired state',async()=>{
+  const p=instance();p.cfg.accessMode='shared';p.cfg.clientId='client';p.cfg.clientSecret='secret';
+  p.cfg.expectedDedicatedEmail='sync@example.com';p.cfg.needsReauth=true;p.cfg.refreshToken='expired';
+  p.cfg.pendingByMode.shared={state:'x',time:Date.now(),pickMode:'shared',redirect:'https://example.org/cb',verifier:'v'};
+  tokenResponse=async()=>({status:200,json:{access_token:'access',expires_in:3600},text:''});
+  await p.finishAuth({state:'x',code:'mock-code'});
+  assert.equal(p.cfg.refreshToken,'expired');assert.equal(p.cfg.needsReauth,true);assert.match(p.cfg.lastAuthError,/更新用トークン/);
+ });
+ await test('Shared inventory checks signed-in account before reading files',async()=>{
+  const p=instance();p.cfg.accessMode='shared';p.cfg.rootId='abcDEF0123456789';p.cfg.refreshToken='yes';
+  p.cfg.expectedDedicatedEmail='sync@example.com';p.drive.about=async()=>({user:{emailAddress:'personal@example.com'}});
+  p.drive.tree=async()=>{throw Error('Should not read file tree before identity verification')};
+  await assert.rejects(p.inventory(),/安全停止/);
+ });
  await test('Drive first remains the default; no deletions',()=>{
   assert.equal(DEFAULTS.initMode,'drive');assert.equal(DEFAULTS.autoEnabled,false);
   assert.equal(typeof DriveIO.prototype.trash,'undefined');
