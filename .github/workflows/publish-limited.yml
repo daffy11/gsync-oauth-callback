@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
     paths:
-      - main.js.xz.b64
+      - .dist/part4.b64
   workflow_dispatch:
 
 permissions:
@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Restore distributable and verify JavaScript
         run: |
-          base64 -d main.js.xz.b64 | xz -d > main.js
+          cat .dist/part{1,2,3,4}.b64 | base64 -d | xz -d > main.js
           node --check main.js
           test -s manifest.json
           grep -q '"id": "gsync-limited"' manifest.json
