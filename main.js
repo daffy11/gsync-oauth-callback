@@ -800,8 +800,13 @@ class LimitedSettings extends PluginSettingTab {
     const scanned=hasFolder&&s.lastScanAt>0&&s.lastScanRoot===s.rootId;
     const visible=scanned?s.lastVisibleFileCount:null;
     el.createEl('p',{text:'初回同期は自動で実行されません。①アクセス権を確認 → ②同期対象を確認 → ③ルールを選択 → ④差分確認 → ⑤適用、の順に進めます。'});
-    new Setting(el).setName('同期方式').setDesc('新方式は専用Googleアカウントの共有フォルダを使用します。OAuthには専用アカウントのDrive全体への権限が必要です。').addDropdown(d=>d.addOptions({shared:'専用Googleアカウント＋共有フォルダ',limited:'個別ファイル許可（旧方式）'}).setValue(s.accessMode||'limited').onChange(v=>void p.switchAccessMode(v)));
+    new Setting(el).setName('同期方式').setDesc('新方式は専用Googleアカウントの共有フォルダを使用します。OAuthには専用アカウントのDrive全体への権限が必要です。').addDropdown(d=>d.addOptions({limited:'1アカウント：drive.file（ファイル単位）',shared:'2アカウント：共有フォルダ（Drive全体の権限）'}).setValue(s.accessMode||'limited').onChange(v=>void p.switchAccessMode(v)));
     const shared=(s.accessMode||'limited')==='shared';
+    if(!shared){
+      const scopeAlert=el.createEl('p',{text:'安全モード（1アカウント）: drive.fileで許可済みファイルのみ操作します。Drive for desktopのVaultを丸ごと自動同期する方式ではありません。Googleの高度な保護を解除しないでください。'});
+      scopeAlert.style.color='var(--text-warning)';
+    }
+    new Setting(el).setName('認証情報の保管').setDesc('0.3.2以降はOAuthトークン・Client Secret・PKCE情報を端末側のSecretStorageに保存し、Vault内のdata.jsonには保存しません。旧版がDriveに保存した履歴は残る場合があります。');
     new Setting(el).setName('現在のセットアップ状況').setHeading();
     box('① Google認証: '+(s.needsReauth?'更新が必要':hasAuth?'済み':'未完了'),s.needsReauth?'Google認証が失効しました。下の「再認証」を実行してください。':hasAuth?(s.lastAuthCheck?'Google接続確認: '+date(s.lastAuthCheck):'トークンは保存済み。接続テストが必要です。'):'OAuth設定とログインが必要です。',hasAuth&&s.lastAuthCheck&&!s.needsReauth?'ok':'warn');
     if(s.lastAuthError)box('認証の前回エラー',s.lastAuthError,'warn');
