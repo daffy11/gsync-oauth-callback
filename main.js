@@ -274,6 +274,15 @@ class GSyncLimited extends Plugin {
       this.cfg.clientSecret=local.clientSecret||'';
       this.cfg.pendingByMode=local.pendingByMode||{};
       this.cfg.pending=local.pending||null;
+      // Never restore stale profile credentials from a Drive-synced copy once a
+      // valid device-local SecretStorage record exists.
+      this.cfg.modeProfiles=this.cfg.modeProfiles||{};
+      for(const profile of Object.values(this.cfg.modeProfiles||{})){
+        if(profile&&typeof profile==='object'){
+          delete profile.refreshToken;delete profile.clientSecret;
+          delete profile.pendingByMode;delete profile.pending;
+        }
+      }
       for(const [mode,auth] of Object.entries(local.profiles||{})){
         this.cfg.modeProfiles=this.cfg.modeProfiles||{};
         this.cfg.modeProfiles[mode]={...(this.cfg.modeProfiles[mode]||{}),refreshToken:auth.refreshToken||''};
